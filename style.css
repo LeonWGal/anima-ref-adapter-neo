@@ -245,3 +245,60 @@ html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
     margin-top: 4px !important;
     background: transparent !important;
 }
+
+/* Multi-reference tabs & influence */
+.anima-ref-root .anima-ref-tabs {
+    border: none !important;
+    background: transparent !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.anima-ref-root .anima-ref-tabs > .tab-nav {
+    display: flex !important;
+    gap: 3px !important;
+    border-bottom: 1px solid var(--border-color-primary, #e5e7eb) !important;
+    margin-bottom: 6px !important;
+    background: transparent !important;
+}
+
+.anima-ref-root .anima-ref-tabs > .tab-nav button {
+    font-size: 11.5px !important;
+    font-weight: 500 !important;
+    padding: 4px 8px !important;
+    border-radius: 6px 6px 0 0 !important;
+    border: 1px solid transparent !important;
+    border-bottom: none !important;
+    background: transparent !important;
+    color: var(--body-text-color-subdued, #6b7280) !important;
+    transition: all 0.15s ease !important;
+}
+
+.anima-ref-root .anima-ref-tabs > .tab-nav button:hover {
+    color: var(--body-text-color, #111827) !important;
+    background: var(--background-fill-secondary, #f3f4f6) !important;
+}
+
+.anima-ref-root .anima-ref-tabs > .tab-nav button.selected {
+    color: var(--primary-500, var(--button-primary-background-fill, #2563eb)) !important;
+    background: var(--background-fill-primary, #ffffff) !important;
+    border-color: var(--border-color-primary, #e5e7eb) !important;
+    font-weight: 600 !important;
+}
+
+.anima-ref-root .anima-weight-row {
+    margin-top: 4px !important;
+}
+
+.anima-ref-root .anima-ref-weight-slider {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.anima-ref-root .anima-ref-weight-slider label {
+    font-size: 11px !important;
+}
+
+.anima-ref-root .anima-multi-mode-row {
+    margin: 2px 0 !important;
+}

@@ -20,6 +20,7 @@ from lib_anima_ref import (
     AnimaSafePAGConfig,
     _is_valid_safetensors,
     download_pilot_lora,
+    encode_multi_reference_latents,
     encode_reference_latents,
     find_lora_path,
     is_anima_adapter,
@@ -95,6 +96,7 @@ class AnimaRefAdapterForForge(scripts.Script):
     def __init__(self):
         super().__init__()
         self._last_letterboxed_ref: Optional[Image.Image] = None
+        self._last_letterboxed_list: list[Image.Image] = []
         self._tab_components: dict[str, dict[str, gr.components.Component]] = {
             "txt2img": {},
             "img2img": {},
@@ -159,7 +161,7 @@ class AnimaRefAdapterForForge(scripts.Script):
         if not wiring.get("bound_dims") and all(k in comps for k in ("width", "height")):
             wiring["bound_dims"] = True
             match_ar_btn = wiring["match_ar_btn"]
-            ref_image = wiring["ref_image"]
+            ref_images = wiring["ref_images"]
             fill = wiring["fill"]
             preview_toggle = wiring["preview_toggle"]
             letterbox_preview = wiring["letterbox_preview"]
@@ -169,8 +171,18 @@ class AnimaRefAdapterForForge(scripts.Script):
             if action_feedback is not None:
                 outputs.append(action_feedback)
 
-            def _match_aspect(img, fill_val, show_prev):
-                pil_img = _coerce_pil_image(img)
+            def _match_aspect(*args):
+                imgs = args[:-2]
+                fill_val = args[-2]
+                show_prev = args[-1]
+
+                pil_img = None
+                for candidate in imgs:
+                    p = _coerce_pil_image(candidate)
+                    if p is not None:
+                        pil_img = p
+                        break
+
                 if pil_img is None:
                     if action_feedback is not None:
                         return gr.skip(), gr.skip(), gr.skip(), gr.update(value="⚠️ Upload a reference image first")
@@ -187,25 +199,37 @@ class AnimaRefAdapterForForge(scripts.Script):
 
             match_ar_btn.click(
                 fn=_match_aspect,
-                inputs=[ref_image, fill, preview_toggle],
+                inputs=[*ref_images, fill, preview_toggle],
                 outputs=outputs,
                 queue=False,
                 show_progress=False,
             )
 
-            def _update_letterbox_preview(img, show_prev, w, h, fill_val):
+            def _update_letterbox_preview(*args):
+                imgs = args[:-4]
+                show_prev = args[-4]
+                w = args[-3]
+                h = args[-2]
+                fill_val = args[-1]
+
                 if not show_prev:
                     return gr.update(visible=False)
-                pil_img = _coerce_pil_image(img)
+                pil_img = None
+                for candidate in imgs:
+                    p = _coerce_pil_image(candidate)
+                    if p is not None:
+                        pil_img = p
+                        break
                 if pil_img is None:
                     return gr.update(value=None, visible=True)
                 _, lb_pil = letterbox_image(pil_img, int(w or 1024), int(h or 1024), int(fill_val))
                 return gr.update(value=lb_pil, visible=True)
 
-            for trig in (preview_toggle.change, ref_image.change, fill.release):
+            preview_inputs = [*ref_images, preview_toggle, comps["width"], comps["height"], fill]
+            for trig in [preview_toggle.change, fill.release] + [img.change for img in ref_images]:
                 trig(
                     fn=_update_letterbox_preview,
-                    inputs=[ref_image, preview_toggle, comps["width"], comps["height"], fill],
+                    inputs=preview_inputs,
                     outputs=[letterbox_preview],
                     queue=False,
                     show_progress=False,
@@ -233,17 +257,46 @@ class AnimaRefAdapterForForge(scripts.Script):
             ):
                 with gr.Row(elem_classes=["anima-workspace-row"], equal_height=False):
                     with gr.Column(scale=5, elem_classes=["anima-col-ref"]):
-                        ref_image = gr.Image(
-                            label="Reference image",
-                            show_label=False,
-                            type="pil",
-                            sources=["upload", "clipboard"],
-                            height=230 if lobe_active else 250,
-                            show_download_button=False,
-                            show_share_button=False,
-                            elem_id=self.elem_id("ref_image"),
-                            elem_classes=["anima-ref-image"],
-                        )
+                        ref_images = []
+                        ref_weights = []
+                        with gr.Tabs(elem_classes=["anima-ref-tabs"]):
+                            for idx in range(1, 5):
+                                tab_title = "Ref 1 (Main)" if idx == 1 else f"Ref {idx}"
+                                with gr.TabItem(tab_title, elem_id=self.elem_id(f"tab_ref{idx}")):
+                                    img_comp = gr.Image(
+                                        label=f"Reference {idx}",
+                                        show_label=False,
+                                        type="pil",
+                                        sources=["upload", "clipboard"],
+                                        height=210 if lobe_active else 230,
+                                        show_download_button=False,
+                                        show_share_button=False,
+                                        elem_id=self.elem_id(f"ref_image_{idx}"),
+                                        elem_classes=["anima-ref-image"],
+                                    )
+                                    ref_images.append(img_comp)
+                                    with gr.Row(elem_classes=["anima-weight-row"]):
+                                        w_comp = gr.Slider(
+                                            minimum=0.0,
+                                            maximum=2.0,
+                                            value=1.0,
+                                            step=0.05,
+                                            label=f"Weight",
+                                            elem_id=self.elem_id(f"ref_weight_{idx}"),
+                                            elem_classes=["anima-ref-weight-slider"],
+                                        )
+                                        ref_weights.append(w_comp)
+
+                        with gr.Row(elem_classes=["anima-multi-mode-row"]):
+                            combine_mode = gr.Radio(
+                                choices=["attention", "blend"],
+                                value="attention",
+                                label="Multi-ref mode",
+                                elem_id=self.elem_id("combine_mode"),
+                                elem_classes=["anima-segmented-radio"],
+                                tooltip="attention: 3D DiT attends across all reference frames concurrently. blend: weighted latent blend.",
+                            )
+
                         ref_info = gr.Markdown(
                             value="*No reference image loaded*",
                             elem_id=self.elem_id("ref_info"),
@@ -260,7 +313,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 "📐 Match Aspect (~1MP)",
                                 size="sm",
                                 elem_id=self.elem_id("match_ar"),
-                                tooltip="Adjust canvas dimensions to match reference aspect ratio at ~1 megapixel",
+                                tooltip="Adjust canvas dimensions to match primary reference aspect ratio at ~1 megapixel",
                             )
                         action_feedback = gr.Markdown(
                             value="",
@@ -472,25 +525,47 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 elem_id=self.elem_id("pag_heads"),
                             )
 
-        def _on_image_change(img):
-            pil_img = _coerce_pil_image(img)
-            if pil_img is None:
+        def _on_images_change(*imgs):
+            loaded = []
+            for idx, c in enumerate(imgs, 1):
+                p = _coerce_pil_image(c)
+                if p is not None:
+                    loaded.append((idx, p))
+            if not loaded:
                 return "*No reference image loaded*"
-            w, h = pil_img.size
-            rec_w, rec_h = _calc_anima_1mp_resolution(pil_img)
+
+            primary_idx, primary_pil = loaded[0]
+            w, h = primary_pil.size
+            rec_w, rec_h = _calc_anima_1mp_resolution(primary_pil)
             gcd = math.gcd(w, h)
-            ar_str = f"{w // gcd}:{h // gcd}" if gcd > 0 and (w // gcd) <= 32 and (h // gcd) <= 32 else f"{w/h:.2f}:1"
+            ar_str = (
+                f"{w // gcd}:{h // gcd}"
+                if gcd > 0 and (w // gcd) <= 32 and (h // gcd) <= 32
+                else f"{w/h:.2f}:1"
+            )
             mp = (w * h) / 1_000_000.0
             rec_mp = (rec_w * rec_h) / 1_000_000.0
-            return f"**{w} × {h}** ({ar_str}, {mp:.2f} MP) ➔ Recommended canvas: **{rec_w} × {rec_h}** ({rec_mp:.2f} MP)"
 
-        ref_image.change(
-            fn=_on_image_change,
-            inputs=[ref_image],
-            outputs=[ref_info],
-            queue=False,
-            show_progress=False,
-        )
+            if len(loaded) == 1:
+                return (
+                    f"**Ref {primary_idx}**: {w} × {h} ({ar_str}, {mp:.2f} MP) ➔ "
+                    f"Recommended canvas: **{rec_w} × {rec_h}** ({rec_mp:.2f} MP)"
+                )
+            else:
+                slots_str = ", ".join(f"#{i}" for i, _ in loaded)
+                return (
+                    f"✓ **{len(loaded)} reference images active** (slots {slots_str}) ➔ "
+                    f"Canvas: **{rec_w} × {rec_h}** ({rec_mp:.2f} MP)"
+                )
+
+        for img_comp in ref_images:
+            img_comp.change(
+                fn=_on_images_change,
+                inputs=ref_images,
+                outputs=[ref_info],
+                queue=False,
+                show_progress=False,
+            )
 
         # Presets
         btn_balanced.click(
@@ -613,7 +688,7 @@ class AnimaRefAdapterForForge(scripts.Script):
         self._pending_tab_wirings[tab] = {
             "apply_defaults_btn": apply_defaults_btn,
             "match_ar_btn": match_ar_btn,
-            "ref_image": ref_image,
+            "ref_images": ref_images,
             "fill": fill,
             "preview_toggle": preview_toggle,
             "letterbox_preview": letterbox_preview,
@@ -626,6 +701,7 @@ class AnimaRefAdapterForForge(scripts.Script):
             (strength, "Anima Ref Strength"),
             (ref_guidance, "Anima Ref Guidance"),
             (correction, "Anima Ref Correction"),
+            (combine_mode, "Anima Ref Combine Mode"),
             (rescale_phi, "Anima Ref Rescale Phi"),
             (ref_offset_h, "Anima Ref Offset H"),
             (fill, "Anima Ref Fill"),
@@ -641,7 +717,15 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         return [
             enable,
-            ref_image,
+            ref_images[0],
+            ref_weights[0],
+            ref_images[1],
+            ref_weights[1],
+            ref_images[2],
+            ref_weights[2],
+            ref_images[3],
+            ref_weights[3],
+            combine_mode,
             lora_name,
             strength,
             ref_guidance,
@@ -665,7 +749,15 @@ class AnimaRefAdapterForForge(scripts.Script):
         self,
         p: StableDiffusionProcessing,
         enable: bool,
-        ref_image,
+        ref_image1,
+        ref_weight1: float,
+        ref_image2,
+        ref_weight2: float,
+        ref_image3,
+        ref_weight3: float,
+        ref_image4,
+        ref_weight4: float,
+        combine_mode: str,
         lora_name: str,
         strength: float,
         ref_guidance: float,
@@ -687,6 +779,7 @@ class AnimaRefAdapterForForge(scripts.Script):
         **kwargs,
     ):
         self._last_letterboxed_ref = None
+        self._last_letterboxed_list = []
         if not enable:
             return
 
@@ -710,8 +803,18 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         unet = p.sd_model.forge_objects.unet
 
-        pil_ref = _coerce_pil_image(ref_image)
-        if pil_ref is not None:
+        active_refs = []
+        for img, weight in [
+            (ref_image1, ref_weight1),
+            (ref_image2, ref_weight2),
+            (ref_image3, ref_weight3),
+            (ref_image4, ref_weight4),
+        ]:
+            pil = _coerce_pil_image(img)
+            if pil is not None and float(weight or 0) > 0:
+                active_refs.append((pil, float(weight)))
+
+        if active_refs:
             lora_path = find_lora_path(lora_name)
             if lora_path is None or not is_anima_adapter(lora_path):
                 bad_name = os.path.basename(lora_path) if lora_path else (lora_name or "None")
@@ -733,15 +836,17 @@ class AnimaRefAdapterForForge(scripts.Script):
                     target_h = int(p.hr_upscale_to_y if getattr(p, "is_hr_pass", False) else p.height)
 
                 vae = p.sd_model.forge_objects.vae
-                ref_latents, letterboxed_pil = encode_reference_latents(
-                    image=pil_ref,
+                ref_latents, letterboxed_list = encode_multi_reference_latents(
+                    images_with_weights=active_refs,
                     vae=vae,
                     width=target_w,
                     height=target_h,
                     fill=int(fill),
+                    combine_mode=str(combine_mode or "attention"),
                 )
                 if include_ref_in_gallery:
-                    self._last_letterboxed_ref = letterboxed_pil
+                    self._last_letterboxed_list = letterboxed_list
+                    self._last_letterboxed_ref = letterboxed_list[0] if letterboxed_list else None
 
                 try:
                     config = AnimaRefAdapterConfig(
@@ -752,6 +857,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                         correction=str(correction),
                         rescale_phi=float(rescale_phi),
                         fill=int(fill),
+                        combine_mode=str(combine_mode or "attention"),
                     )
                     unet = patch_unet_for_anima_ref(unet, ref_latents, config)
                 except Exception as exc:
@@ -763,6 +869,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                 p.extra_generation_params["Anima Ref Strength"] = float(strength)
                 p.extra_generation_params["Anima Ref Guidance"] = float(ref_guidance)
                 p.extra_generation_params["Anima Ref Correction"] = str(correction)
+                p.extra_generation_params["Anima Ref Combine Mode"] = str(combine_mode or "attention")
+                p.extra_generation_params["Anima Ref Images"] = len(active_refs)
                 if str(correction).lower() == "rescale":
                     p.extra_generation_params["Anima Ref Rescale Phi"] = float(rescale_phi)
                 p.extra_generation_params["Anima Ref Offset H"] = float(ref_offset_h)
@@ -797,6 +905,11 @@ class AnimaRefAdapterForForge(scripts.Script):
         p.sd_model.forge_objects.unet = unet
 
     def postprocess(self, p: StableDiffusionProcessing, processed: Processed, *args):
-        if self._last_letterboxed_ref is not None:
+        if getattr(self, "_last_letterboxed_list", None):
+            for lb in self._last_letterboxed_list:
+                processed.extra_images.append(lb)
+            self._last_letterboxed_list = []
+            self._last_letterboxed_ref = None
+        elif self._last_letterboxed_ref is not None:
             processed.extra_images.append(self._last_letterboxed_ref)
             self._last_letterboxed_ref = None

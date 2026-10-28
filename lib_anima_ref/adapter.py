@@ -73,6 +73,7 @@ class AnimaRefAdapterConfig:
     correction: str = "apg"  # "apg", "rescale", "none"
     rescale_phi: float = 0.5
     fill: int = 255
+    combine_mode: str = "attention"  # "attention", "blend"
 
 
 @dataclasses.dataclass
@@ -434,12 +435,15 @@ def _pick_ref(refs: list[torch.Tensor], size: tuple[int, int]) -> torch.Tensor:
             f"[Anima Ref Adapter] No reference encoded at latent size {size}; "
             f"resizing the {tuple(ref.shape[-2:])} one (lower fidelity)"
         )
-    shrink = ref.shape[-2] > size[0]
-    return F.interpolate(
-        ref[:, :, 0].float(),
+    b, c, k, h, w = ref.shape
+    reshaped = ref.permute(0, 2, 1, 3, 4).reshape(b * k, c, h, w)
+    shrink = h > size[0]
+    resized = F.interpolate(
+        reshaped.float(),
         size=size,
         mode="area" if shrink else "bilinear",
-    ).unsqueeze(2)
+    ).to(ref.dtype)
+    return resized.reshape(b, k, c, size[0], size[1]).permute(0, 2, 1, 3, 4)
 
 
 def _ref_forward(
@@ -451,7 +455,7 @@ def _ref_forward(
     offset_ratio: float,
     transformer_options: dict,
 ) -> torch.Tensor:
-    """Anima DiT forward pass with the reference latent as a 2nd frame (timestep 0, shifted RoPE)."""
+    """Anima DiT forward pass with reference latents (1 or more frames, timestep 0, shifted RoPE)."""
     orig_shape = list(x.shape)
     was_4d = x.ndim == 4
     if was_4d:
@@ -463,18 +467,23 @@ def _ref_forward(
     if ref.shape[0] != x.shape[0]:
         ref = repeat_to_batch_size(ref, x.shape[0])
 
-    frames = torch.cat([x[:, :, :1], ref[:, :, :1]], dim=2)
+    num_refs = ref.shape[2]
+    frames = torch.cat([x[:, :, :1], ref], dim=2)
     x_emb, _, extra = dm.prepare_embedded_sequence(frames, padding_mask=None)
     _, _, hp, wp, _ = x_emb.shape
 
-    positions = [
-        _frame_positions(0, hp, wp, 0, 0, x.device),
-        _frame_positions(1, hp, wp, round(offset_ratio * hp), 0, x.device),
-    ]
+    positions = [_frame_positions(0, hp, wp, 0, 0, x.device)]
+    for idx in range(num_refs):
+        positions.append(
+            _frame_positions(1 + idx, hp, wp, round((1 + idx) * offset_ratio * hp), 0, x.device)
+        )
     rope = _rope_from_positions(dm.pos_embedder, *(torch.cat(axis) for axis in zip(*positions)))
 
     timesteps = timesteps.reshape(x.shape[0], -1)[:, :1]
-    timesteps = torch.cat([timesteps, torch.zeros_like(timesteps)], dim=1)
+    timesteps = torch.cat(
+        [timesteps, torch.zeros(timesteps.shape[0], num_refs, device=timesteps.device, dtype=timesteps.dtype)],
+        dim=1,
+    )
     t_emb, adaln = dm.t_embedder[1](dm.t_embedder[0](timesteps).to(x_emb.dtype))
     t_emb = dm.t_embedding_norm(t_emb)
 
@@ -584,6 +593,70 @@ def encode_reference_latents(
         _ref_latent_cache.pop(next(iter(_ref_latent_cache)))
     _ref_latent_cache[cache_key] = out
     return out, letterboxed_pil
+
+
+@torch.inference_mode()
+def encode_multi_reference_latents(
+    images_with_weights: list[tuple[Image.Image, float]],
+    vae: "VAE",
+    width: int,
+    height: int,
+    fill: int = 255,
+    combine_mode: str = "attention",
+) -> tuple[dict[str, torch.Tensor], list[Image.Image]]:
+    """Letterbox and VAE-encode multiple reference images.
+
+    If combine_mode == 'attention', stacks reference frames along dimension 2 (K frames).
+    If combine_mode == 'blend', computes a weighted linear blend of the encoded latents.
+    """
+    if not images_with_weights:
+        raise ValueError("No reference images provided.")
+
+    all_refs: list[torch.Tensor] = []
+    all_halfs: list[torch.Tensor] = []
+    letterboxed_list: list[Image.Image] = []
+    weights: list[float] = []
+
+    for img, weight in images_with_weights:
+        lat_dict, lb_pil = encode_reference_latents(img, vae, width, height, fill)
+        all_refs.append(lat_dict["samples"])
+        if "samples_half" in lat_dict and lat_dict["samples_half"] is not None:
+            all_halfs.append(lat_dict["samples_half"])
+        letterboxed_list.append(lb_pil)
+        weights.append(max(0.01, float(weight)))
+
+    total_w = sum(weights) or 1.0
+    norm_weights = [w / total_w for w in weights]
+
+    if combine_mode == "blend" and len(all_refs) > 1:
+        # Weighted blend across latents
+        blended_ref = sum(r * w for r, w in zip(all_refs, norm_weights))
+        blended_half = (
+            sum(h * w for h, w in zip(all_halfs, norm_weights))
+            if len(all_halfs) == len(all_refs)
+            else None
+        )
+        out = {
+            "samples": blended_ref,
+            "samples_half": blended_half,
+        }
+    else:
+        # Multi-frame attention: stack along K dimension (dim=2)
+        # Each latent has shape (B, C, 1, H, W) or (B, C, H, W)
+        standardized_refs = [r if r.ndim == 5 else r.unsqueeze(2) for r in all_refs]
+        stacked_refs = torch.cat(standardized_refs, dim=2)  # (B, C, K, H, W)
+
+        stacked_halfs = None
+        if len(all_halfs) == len(all_refs):
+            standardized_halfs = [h if h.ndim == 5 else h.unsqueeze(2) for h in all_halfs]
+            stacked_halfs = torch.cat(standardized_halfs, dim=2)
+
+        out = {
+            "samples": stacked_refs,
+            "samples_half": stacked_halfs,
+        }
+
+    return out, letterboxed_list
 
 
 def _flat_dims(x: torch.Tensor) -> tuple[int, ...]:
