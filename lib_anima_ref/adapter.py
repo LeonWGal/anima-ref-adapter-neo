@@ -96,18 +96,16 @@ def _extension_models_dir() -> str:
 
 
 def _lora_search_dirs() -> list[str]:
-    dirs: list[str] = []
+    ext_models = _extension_models_dir()
+    dirs: list[str] = [ext_models]
     cmd_opts = getattr(shared, "cmd_opts", None)
     if cmd_opts is not None:
         lora_dir = getattr(cmd_opts, "lora_dir", None)
-        if lora_dir and os.path.isdir(lora_dir):
+        if lora_dir and os.path.isdir(lora_dir) and lora_dir not in dirs:
             dirs.append(lora_dir)
         for d in getattr(cmd_opts, "lora_dirs", []) or []:
             if d and os.path.isdir(d) and d not in dirs:
                 dirs.append(d)
-    ext_models = _extension_models_dir()
-    if ext_models not in dirs:
-        dirs.append(ext_models)
     return dirs
 
 
@@ -118,31 +116,50 @@ def list_lora_files() -> dict[str, str]:
     """
     found: dict[str, str] = {}
     allowed_exts = (".safetensors", ".pt", ".ckpt")
+    ext_models = _extension_models_dir()
 
     for base_dir in _lora_search_dirs():
+        if not os.path.isdir(base_dir):
+            continue
         for root, _, files in os.walk(base_dir, followlinks=True):
             for fname in files:
                 if not fname.lower().endswith(allowed_exts):
                     continue
                 full_path = os.path.abspath(os.path.join(root, fname))
-                rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
+                if base_dir == ext_models:
+                    rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
+                else:
+                    rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
                 if rel_path not in found:
                     found[rel_path] = full_path
 
     def _sort_key(item: tuple[str, str]):
         name_lower = os.path.basename(item[0]).lower()
+        is_ext_pilot = (
+            name_lower == PILOT_LORA_FILENAME.lower()
+            and os.path.dirname(item[1]).replace("\\", "/").rstrip("/").endswith("sd-forge-anima-ref-adapter/models")
+        )
         is_pilot = name_lower == PILOT_LORA_FILENAME.lower()
         is_anima_ref = "anima" in name_lower and "ref" in name_lower
         is_anima = "anima" in name_lower or "ref" in name_lower
-        return (not is_pilot, not is_anima_ref, not is_anima, name_lower)
+        return (not is_ext_pilot, not is_pilot, not is_anima_ref, not is_anima, name_lower)
 
     return dict(sorted(found.items(), key=_sort_key))
 
 
 def find_lora_path(lora_name: str) -> Optional[str]:
     """Resolve a LoRA dropdown selection, filename, or full path to an existing file."""
+    ext_pilot = os.path.join(_extension_models_dir(), PILOT_LORA_FILENAME)
     if not lora_name:
+        if os.path.isfile(ext_pilot) and _is_valid_safetensors(ext_pilot):
+            return ext_pilot
         return None
+
+    # Check extension models first
+    direct_ext = os.path.join(_extension_models_dir(), os.path.basename(lora_name))
+    if os.path.isfile(direct_ext) and _is_valid_safetensors(direct_ext):
+        return direct_ext
+
     if os.path.isfile(lora_name):
         return os.path.abspath(lora_name)
 
@@ -154,6 +171,9 @@ def find_lora_path(lora_name: str) -> Optional[str]:
     for rel, full in available.items():
         if os.path.basename(rel).lower() == target_base or os.path.splitext(os.path.basename(rel))[0].lower() == target_base:
             return full
+
+    if os.path.isfile(ext_pilot) and _is_valid_safetensors(ext_pilot):
+        return ext_pilot
     return None
 
 
@@ -182,17 +202,13 @@ def _is_valid_safetensors(path: str) -> bool:
 
 
 def download_pilot_lora() -> tuple[str, str]:
-    """Download `anima_ref_adapter_pilot_r32.safetensors` from Hugging Face into the LoRA directory."""
-    existing = find_lora_path(PILOT_LORA_FILENAME)
-    if existing and _is_valid_safetensors(existing):
-        return existing, f"Already installed and verified: {existing}"
+    """Download `anima_ref_adapter_pilot_r32.safetensors` from Hugging Face directly into the extension models directory."""
+    target_dir = _extension_models_dir()
+    dest_path = os.path.join(target_dir, PILOT_LORA_FILENAME)
+    if os.path.isfile(dest_path) and _is_valid_safetensors(dest_path):
+        return dest_path, f"Verified in extension models folder: {dest_path}"
 
-    search_dirs = _lora_search_dirs()
-    target_dir = os.path.dirname(existing) if existing else (search_dirs[0] if search_dirs else _extension_models_dir())
-    os.makedirs(target_dir, exist_ok=True)
-    dest_path = existing or os.path.join(target_dir, PILOT_LORA_FILENAME)
     tmp_path = dest_path + ".download"
-
     logger.info(f"[Anima Ref Adapter] Downloading {PILOT_LORA_URL} -> {dest_path} ...")
     try:
         req = urllib.request.Request(PILOT_LORA_URL, headers={"User-Agent": "Forge-Neo-Anima-Ref-Adapter/1.0"})

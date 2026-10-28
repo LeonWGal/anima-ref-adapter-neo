@@ -90,14 +90,16 @@ html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
 }
 
 .anima-ref-root .anima-util-row,
-.anima-ref-root .anima-checks-row {
+.anima-ref-root .anima-checks-row,
+.anima-ref-root .anima-presets-row {
     display: flex !important;
     flex-wrap: wrap !important;
     gap: 6px !important;
     align-items: center !important;
 }
 
-.anima-ref-root .anima-util-row button {
+.anima-ref-root .anima-util-row button,
+.anima-ref-root .anima-presets-row button {
     flex: 1 1 auto !important;
     min-width: fit-content !important;
 }

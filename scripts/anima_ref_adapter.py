@@ -265,6 +265,12 @@ class AnimaRefAdapterForForge(scripts.Script):
                             elem_classes=["anima-status-text"],
                         )
 
+                        with gr.Row(elem_classes=["anima-presets-row"]):
+                            btn_balanced = gr.Button("Balanced", size="sm")
+                            btn_strong = gr.Button("Strong likeness", size="sm")
+                            btn_soft = gr.Button("Soft / Pose", size="sm")
+                            btn_rescale = gr.Button("High guidance", size="sm")
+
                         with gr.Row(elem_classes=["anima-sliders-row"]):
                             strength = gr.Slider(
                                 minimum=0.0,
@@ -422,6 +428,36 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 elem_id=self.elem_id("pag_heads"),
                             )
 
+        # Presets
+        btn_balanced.click(
+            fn=lambda: (1.0, 4.5, "apg", 0.5, gr.update(visible=False)),
+            inputs=[],
+            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi],
+            queue=False,
+            show_progress=False,
+        )
+        btn_strong.click(
+            fn=lambda: (1.1, 6.0, "apg", 0.5, gr.update(visible=False)),
+            inputs=[],
+            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi],
+            queue=False,
+            show_progress=False,
+        )
+        btn_soft.click(
+            fn=lambda: (0.85, 3.5, "apg", 0.5, gr.update(visible=False)),
+            inputs=[],
+            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi],
+            queue=False,
+            show_progress=False,
+        )
+        btn_rescale.click(
+            fn=lambda: (1.0, 6.5, "rescale", 0.7, gr.update(visible=True)),
+            inputs=[],
+            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi],
+            queue=False,
+            show_progress=False,
+        )
+
         correction.change(
             fn=lambda val: gr.update(visible=(str(val).lower() == "rescale")),
             inputs=[correction],
@@ -456,13 +492,14 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _refresh_loras(current_val):
             choices = list(list_lora_files().keys())
-            val = current_val if current_val in choices else _default_lora_choice(choices)
-            path = find_lora_path(val) if val else None
-            valid = bool(path and _is_valid_safetensors(path))
+            # Auto-select pilot lora if current selection is invalid or not an Anima adapter
+            path = find_lora_path(current_val) if current_val else None
+            val = current_val if (path and _is_valid_safetensors(path) and "anima" in os.path.basename(path).lower()) else _default_lora_choice(choices)
+            valid = bool(val and find_lora_path(val) and _is_valid_safetensors(find_lora_path(val)))
             return (
                 gr.update(choices=choices, value=val),
                 gr.update(visible=not valid),
-                gr.update(value="", visible=False),
+                gr.update(value="" if valid else f"`{val or PILOT_LORA_FILENAME}` not found.", visible=not valid),
             )
 
         refresh_btn.click(
@@ -475,13 +512,13 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _download_pilot():
             try:
-                _, msg = download_pilot_lora()
+                dest, msg = download_pilot_lora()
                 choices = list(list_lora_files().keys())
                 val = _default_lora_choice(choices)
                 return (
                     gr.update(choices=choices, value=val),
                     gr.update(visible=False),
-                    gr.update(value=msg, visible=True),
+                    gr.update(value=f"Downloaded into extension folder: `{dest}`", visible=True),
                 )
             except Exception as exc:
                 return (
