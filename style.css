@@ -1,0 +1,109 @@
+.anima-ref-root,
+.anima-ref-root > .gr-group,
+.anima-ref-root > .gradio-group {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+.anima-ref-root {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    width: 100% !important;
+}
+
+/* Fix Lobe Theme stretching the floating gr.Image block-label SVG over the image */
+.anima-ref-root .anima-ref-image label[data-testid="block-label"],
+.anima-ref-root .anima-letterbox-preview label[data-testid="block-label"],
+.anima-ref-root .anima-ref-image > label.float,
+.anima-ref-root .anima-letterbox-preview > label.float {
+    display: none !important;
+}
+
+.anima-ref-root .anima-ref-image .upload-container svg,
+.anima-ref-root .anima-ref-image .icon-wrap svg,
+.anima-ref-root .anima-ref-image .empty svg {
+    width: 28px !important;
+    height: 28px !important;
+    max-width: 28px !important;
+    max-height: 28px !important;
+}
+
+.anima-ref-root .anima-ref-image img,
+.anima-ref-root .anima-letterbox-preview img {
+    object-fit: contain !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    margin: 0 auto !important;
+}
+
+/* Layout adaptation:
+   - Lobe Theme (.anima-ui-lobe / html[data-lobe-forge="true"]): vertical stack for the narrow left panel
+   - Standard Forge-Neo (.anima-ui-classic): 2-column side-by-side layout */
+.anima-ref-root.anima-ui-lobe .anima-workspace-row,
+html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+}
+
+.anima-ref-root.anima-ui-classic .anima-workspace-row {
+    display: grid !important;
+    grid-template-columns: minmax(220px, 5fr) minmax(280px, 7fr) !important;
+    gap: 12px !important;
+    align-items: start !important;
+}
+
+@media (max-width: 680px) {
+    .anima-ref-root.anima-ui-classic .anima-workspace-row {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+.anima-ref-root .anima-col-ref,
+.anima-ref-root .anima-col-controls {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    min-width: 0 !important;
+    width: 100% !important;
+}
+
+.anima-ref-root .anima-lora-row {
+    display: flex !important;
+    align-items: flex-end !important;
+    gap: 6px !important;
+}
+
+.anima-ref-root .anima-lora-row .gradio-dropdown {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+}
+
+.anima-ref-root .anima-sliders-row {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    gap: 10px 12px !important;
+    align-items: end !important;
+}
+
+.anima-ref-root .anima-util-row,
+.anima-ref-root .anima-checks-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    align-items: center !important;
+}
+
+.anima-ref-root .anima-util-row button {
+    flex: 1 1 auto !important;
+    min-width: fit-content !important;
+}
+
+.anima-ref-root .anima-status-text p {
+    margin: 2px 0 !important;
+    font-size: 12px !important;
+    opacity: 0.85;
+}
