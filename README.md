@@ -6,6 +6,28 @@ It ports **[ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronG
 
 > **Character and style from one reference image; pose, place, and framing from your prompt.**
 
+<p align="center">
+  <img src="assets/ui-preview.png" alt="Anima Ref Adapter UI in Forge-Neo" width="620" />
+  <br>
+  <em>Interface running in Forge-Neo with the <a href="https://github.com/LeonWGal/lobe-theme-neo">Lobe Theme Neo</a> theme.</em>
+</p>
+
+---
+
+## Comparison & Examples
+
+The table below demonstrates zero-shot character transfer using Anima Ref Adapter:
+* **Reference Image:** Generated using model **`betterDaysIllustrious`** (`betterDaysIllustriousXL_illuXLV02BAKEDVAE`).
+* **Outputs:** Rendered using model **`rdbtAnima`** (`rdbtAnima_v30BaseSma_fp16`) with Anima Ref Adapter (`anima_ref_adapter_pilot_r32.safetensors`, Strength 1.0, Ref Guidance 4.5, APG).
+
+> [!TIP]
+> Notice how the generated images don't require character appearance tags in the prompt — identity, hair, outfit cues, and art style are transferred automatically from the reference image, while the prompt guides only the pose and action!
+
+| Input Reference (`betterDaysIllustrious`) | Output 1 (`rdbtAnima`) | Output 2 (`rdbtAnima`) | Output 3 (`rdbtAnima`) |
+| :---: | :---: | :---: | :---: |
+| <img src="assets/ref_betterdays_input.png" width="230" alt="Reference betterDaysIllustrious" /> | <img src="assets/output_rdbtanima_wariza.png" width="230" alt="Output rdbtAnima Wariza" /> | <img src="assets/output_rdbtanima_yoga.png" width="230" alt="Output rdbtAnima Yoga" /> | <img src="assets/output_rdbtanima_punch.png" width="230" alt="Output rdbtAnima Punch" /> |
+| **Original Reference**<br/>*(betterDaysIllustrious)* | **`wariza, 1girl`**<br/>*(rdbtAnima)* | **`yoga pants, yoga, 1girl`**<br/>*(rdbtAnima)* | **`punching viewer, 1girl`**<br/>*(rdbtAnima)* |
+
 ---
 
 ## Features
@@ -14,9 +36,10 @@ It ports **[ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronG
 - **RoPE Height Shift (`RoPE Offset H = 1.0`):** Shifts the reference frame's position coordinates, transferring identity and art style without pinning the original pose.
 - **Selective Adapter LoRA & Reference Guidance:** Applies pilot LoRA weights (`anima_ref_adapter_pilot_r32.safetensors`, rank 32) exclusively to reference branches (`pos`/`neg`) and unhooks them from the base branch, enabling high `Reference Guidance` (4.5–6.0).
 - **Anti-Burn Guidance Corrections:** Supports Adaptive Projected Guidance (`apg`) and CFG `rescale` to tame color saturation at high guidance values.
-- **Adaptive UI:** Automatically detects [lobe-theme-neo](https://github.com/LeonWGal/lobe-theme-neo) or standard Forge-Neo themes and adjusts layout accordingly.
+- **Adaptive UI:** Clean native layout for standard Forge-Neo themes and optimized vertical stack for [lobe-theme-neo](https://github.com/LeonWGal/lobe-theme-neo).
+- **Presets with Instant Feedback:** Quick buttons (`Balanced`, `Strong likeness`, `Soft / Pose`, `High guidance`) with real-time active state badge.
 - **Optional Anima Safe PAG:** Perturbed-Attention Guidance on Anima DiT blocks for crisper line art and fine details.
-- **Workflow Shortcuts:** 1-click sampler presets (`Euler`, `Simple`, `28 steps`, `CFG 4.5`), `~1MP` aspect ratio matching, and live letterbox preview.
+- **Workflow Shortcuts:** 1-click optimal sampler configuration (`Euler`, `Simple`, `28 steps`, `CFG 4.5`), `~1MP` aspect ratio matching, and live letterbox preview.
 
 ---
 
@@ -42,9 +65,9 @@ git clone https://github.com/LeonWGal/anima-ref-adapter-neo sd-forge-anima-ref-a
 
 Download the pilot LoRA **[`anima_ref_adapter_pilot_r32.safetensors`](https://huggingface.co/ElectronGirl/anima-ref-adapter/blob/main/anima_ref_adapter_pilot_r32.safetensors)** and place it into:
 ```text
-models/Lora/anima_ref_adapter_pilot_r32.safetensors
+extensions/sd-forge-anima-ref-adapter/models/anima_ref_adapter_pilot_r32.safetensors
 ```
-*(Or click the download button in the extension interface.)*
+*(Or simply click the download button in the extension interface — it will automatically download and verify the weights directly into the extension models directory.)*
 
 ---
 
@@ -52,9 +75,9 @@ models/Lora/anima_ref_adapter_pilot_r32.safetensors
 
 | Setting | Recommended Value | Notes |
 |---|---|---|
-| **Model** | Anima Base v1.0 | Standard prompt LoRAs `<lora:...>` work normally |
-| **Sampler / Scheduler** | `Euler`, `Simple`, `28–30` steps | Matches training setup |
-| **CFG Scale** | `4.5` | Main text CFG |
+| **Model** | Anima Base v1.0 / `rdbtAnima` | Standard prompt LoRAs `<lora:...>` work normally |
+| **Sampler / Scheduler** | `Euler`, `Simple` / `Normal`, `28–32` steps | Avoid stochastic samplers (SDE, Ancestral) to prevent digital noise |
+| **CFG Scale** | `4.0 – 4.5` | Main text CFG |
 | **Reference Guidance** | `4.5 – 6.0` | `1.0` = normal CFG; `4.5–6.0` = strong identity & style lock |
 | **Guidance Correction** | `apg` | Or `rescale` (`Rescale Phi = 0.5`) to prevent over-saturation |
 | **RoPE Offset H** | `1.0` | Training default |
@@ -65,7 +88,7 @@ models/Lora/anima_ref_adapter_pilot_r32.safetensors
 - **Do not** specify character names, artist names, or visual tags already present in the reference image.
 - Only describe the **new scene**, pose, framing, lighting, and general quality:
   ```text
-  masterpiece, best quality, score_7, newest, 1girl, solo, full body, walking in rain, neon reflections, city street
+  wariza, 1girl, masterpiece, best quality, solo
   ```
 
 ---
