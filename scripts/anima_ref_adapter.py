@@ -289,12 +289,16 @@ class AnimaRefAdapterForForge(scripts.Script):
 
                         with gr.Row(elem_classes=["anima-multi-mode-row"]):
                             combine_mode = gr.Radio(
-                                choices=["attention", "blend"],
-                                value="attention",
+                                choices=["split_lr", "attention", "blend"],
+                                value="split_lr",
                                 label="Multi-ref mode",
                                 elem_id=self.elem_id("combine_mode"),
                                 elem_classes=["anima-segmented-radio"],
-                                tooltip="attention: 3D DiT attends across all reference frames concurrently. blend: weighted latent blend.",
+                                tooltip=(
+                                    "split_lr: Split Left/Right — Ref 1 for left character, Ref 2 for right character (ideal for 2 characters, prevents cloning).\n"
+                                    "attention: Global attention across all reference frames concurrently (ideal for multiple views/angles of 1 character).\n"
+                                    "blend: Weighted latent blend before DiT."
+                                ),
                             )
 
                         ref_info = gr.Markdown(
@@ -842,7 +846,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                     width=target_w,
                     height=target_h,
                     fill=int(fill),
-                    combine_mode=str(combine_mode or "attention"),
+                    combine_mode=str(combine_mode or "split_lr"),
                 )
                 if include_ref_in_gallery:
                     self._last_letterboxed_list = letterboxed_list
@@ -857,7 +861,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                         correction=str(correction),
                         rescale_phi=float(rescale_phi),
                         fill=int(fill),
-                        combine_mode=str(combine_mode or "attention"),
+                        combine_mode=str(combine_mode or "split_lr"),
                     )
                     unet = patch_unet_for_anima_ref(unet, ref_latents, config)
                 except Exception as exc:
@@ -869,7 +873,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                 p.extra_generation_params["Anima Ref Strength"] = float(strength)
                 p.extra_generation_params["Anima Ref Guidance"] = float(ref_guidance)
                 p.extra_generation_params["Anima Ref Correction"] = str(correction)
-                p.extra_generation_params["Anima Ref Combine Mode"] = str(combine_mode or "attention")
+                p.extra_generation_params["Anima Ref Combine Mode"] = str(combine_mode or "split_lr")
                 p.extra_generation_params["Anima Ref Images"] = len(active_refs)
                 if str(correction).lower() == "rescale":
                     p.extra_generation_params["Anima Ref Rescale Phi"] = float(rescale_phi)

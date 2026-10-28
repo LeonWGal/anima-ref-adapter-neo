@@ -73,7 +73,7 @@ class AnimaRefAdapterConfig:
     correction: str = "apg"  # "apg", "rescale", "none"
     rescale_phi: float = 0.5
     fill: int = 255
-    combine_mode: str = "attention"  # "attention", "blend"
+    combine_mode: str = "split_lr"  # "split_lr", "attention", "blend"
 
 
 @dataclasses.dataclass
@@ -446,6 +446,51 @@ def _pick_ref(refs: list[torch.Tensor], size: tuple[int, int]) -> torch.Tensor:
     return resized.reshape(b, k, c, size[0], size[1]).permute(0, 2, 1, 3, 4)
 
 
+_mask_cache: dict[tuple, torch.Tensor] = {}
+
+
+def build_spatial_split_mask(
+    hp: int,
+    wp: int,
+    num_refs: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build a spatial attention mask for multi-character generation.
+
+    Query canvas tokens on the left attend to Ref 1 and Canvas;
+    Query canvas tokens on the right attend to Ref 2 and Canvas.
+    For num_refs > 2, divides horizontally into equal segments with smooth margin overlap.
+    """
+    key = (hp, wp, num_refs, str(device), str(dtype))
+    cached = _mask_cache.get(key)
+    if cached is not None:
+        return cached
+
+    N = hp * wp
+    S = (1 + num_refs) * N
+    mask = torch.zeros((1, 1, S, S), dtype=dtype, device=device)
+    if num_refs < 2:
+        _mask_cache[key] = mask
+        return mask
+
+    x_coords = torch.arange(wp, device=device).repeat(hp)
+    margin = max(1, round(wp * 0.04))
+    step = wp / float(num_refs)
+
+    canvas_slice = mask[:, :, :N, :]
+    for ref_idx in range(num_refs):
+        left_bound = ref_idx * step - (margin if ref_idx > 0 else 0)
+        right_bound = (ref_idx + 1) * step + (margin if ref_idx < num_refs - 1 else 0)
+        ref_start = (1 + ref_idx) * N
+        ref_end = (2 + ref_idx) * N
+        canvas_blocked = (x_coords < left_bound) | (x_coords >= right_bound)
+        canvas_slice[:, :, canvas_blocked, ref_start:ref_end] = float("-inf")
+
+    _mask_cache[key] = mask
+    return mask
+
+
 def _ref_forward(
     dm,
     x: torch.Tensor,
@@ -454,6 +499,7 @@ def _ref_forward(
     refs: list[torch.Tensor],
     offset_ratio: float,
     transformer_options: dict,
+    combine_mode: str = "split_lr",
 ) -> torch.Tensor:
     """Anima DiT forward pass with reference latents (1 or more frames, timestep 0, shifted RoPE)."""
     orig_shape = list(x.shape)
@@ -472,10 +518,13 @@ def _ref_forward(
     x_emb, _, extra = dm.prepare_embedded_sequence(frames, padding_mask=None)
     _, _, hp, wp, _ = x_emb.shape
 
+    # Fix: keep all reference frames at t_index = 1 and trained offset_ratio * hp.
+    # Increasing t_index or h0 beyond 1 moves references outside the pilot LoRA's
+    # trained RoPE frequency domain, causing the model to completely ignore subsequent references.
     positions = [_frame_positions(0, hp, wp, 0, 0, x.device)]
     for idx in range(num_refs):
         positions.append(
-            _frame_positions(1 + idx, hp, wp, round((1 + idx) * offset_ratio * hp), 0, x.device)
+            _frame_positions(1, hp, wp, round(offset_ratio * hp), 0, x.device)
         )
     rope = _rope_from_positions(dm.pos_embedder, *(torch.cat(axis) for axis in zip(*positions)))
 
@@ -488,6 +537,35 @@ def _ref_forward(
     t_emb = dm.t_embedding_norm(t_emb)
 
     transformer_options = (transformer_options or {}).copy()
+
+    # Split Left/Right spatial attention mask for 2 or more characters
+    if combine_mode == "split_lr" and num_refs >= 2:
+        split_mask = build_spatial_split_mask(hp, wp, num_refs, x.device, x_emb.dtype)
+        orig_attn_override = transformer_options.get("optimized_attention_override")
+
+        def _split_attn_override(func, *args, **kwargs):
+            # args: (q, k, v, heads)
+            if len(args) >= 4 and split_mask is not None:
+                q, k, v, heads = args[0], args[1], args[2], args[3]
+                # Self-attention check: sequence length of queries and keys matches S
+                if q.shape[2] == k.shape[2] and q.shape[2] == split_mask.shape[-1]:
+                    try:
+                        return func(*args, mask=split_mask.to(device=q.device, dtype=q.dtype), **kwargs)
+                    except Exception:
+                        b = q.shape[0]
+                        dim_head = q.shape[-1]
+                        out = torch.nn.functional.scaled_dot_product_attention(
+                            q, k, v, attn_mask=split_mask.to(device=q.device, dtype=q.dtype), dropout_p=0.0, is_causal=False
+                        )
+                        if not kwargs.get("skip_output_reshape", False):
+                            out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+                        return out
+            if orig_attn_override is not None:
+                return orig_attn_override(func, *args, **kwargs)
+            return func(*args, **kwargs)
+
+        transformer_options["optimized_attention_override"] = _split_attn_override
+
     block_kwargs = {
         "rope_emb_L_1_1_D": rope.unsqueeze(1).unsqueeze(0),
         "adaln_lora_B_T_3D": adaln,
@@ -509,7 +587,13 @@ def _ref_forward(
     return out[:, :, : orig_shape[-3], : orig_shape[-2], : orig_shape[-1]]
 
 
-def _make_forward_wrapper(dm, orig_forward, adapter: _Adapter, offset_ratio: float):
+def _make_forward_wrapper(
+    dm,
+    orig_forward,
+    adapter: _Adapter,
+    offset_ratio: float,
+    combine_mode: str = "split_lr",
+):
     orig_forward = getattr(orig_forward, "_anima_ref_inner", orig_forward)
 
     def wrapped_forward(x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, padding_mask=None, **kwargs):
@@ -528,6 +612,7 @@ def _make_forward_wrapper(dm, orig_forward, adapter: _Adapter, offset_ratio: flo
                 refs,
                 offset_ratio,
                 kwargs.get("transformer_options", {}),
+                combine_mode=combine_mode,
             )
         finally:
             _active["key"] = previous
@@ -602,12 +687,12 @@ def encode_multi_reference_latents(
     width: int,
     height: int,
     fill: int = 255,
-    combine_mode: str = "attention",
+    combine_mode: str = "split_lr",
 ) -> tuple[dict[str, torch.Tensor], list[Image.Image]]:
     """Letterbox and VAE-encode multiple reference images.
 
-    If combine_mode == 'attention', stacks reference frames along dimension 2 (K frames).
     If combine_mode == 'blend', computes a weighted linear blend of the encoded latents.
+    If combine_mode in ('split_lr', 'attention'), stacks reference frames along dimension 2 (K frames).
     """
     if not images_with_weights:
         raise ValueError("No reference images provided.")
@@ -683,7 +768,7 @@ def patch_unet_for_anima_ref(
     orig_forward = m.get_model_object("diffusion_model.forward")
     m.add_object_patch(
         "diffusion_model.forward",
-        _make_forward_wrapper(dm, orig_forward, adapter, config.ref_offset_h),
+        _make_forward_wrapper(dm, orig_forward, adapter, config.ref_offset_h, config.combine_mode),
     )
 
     ref_main = ref_latents["samples"]
