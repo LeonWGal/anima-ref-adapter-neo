@@ -300,7 +300,16 @@ class _Adapter:
         if not raw_weights:
             raise ValueError(f"{path} has no diffusion_model lora_down/lora_up weights")
 
-        self.weights = _remap_anima_blocks(raw_weights, num_blocks)
+        # Ensure the LoRA actually targets Anima DiT blocks (blocks.*), rather than SDXL/Pony/SD1.5
+        anima_weights = {k: v for k, v in raw_weights.items() if k.startswith("blocks.")}
+        if not anima_weights:
+            raise ValueError(
+                f"'{os.path.basename(path)}' does not contain Anima DiT adapter weights (0 'blocks.*' keys found). "
+                f"It appears to be an SDXL/Pony/SD1.5 LoRA. "
+                f"Anima Ref Adapter requires '{PILOT_LORA_FILENAME}' or another Anima reference adapter."
+            )
+
+        self.weights = _remap_anima_blocks(anima_weights, num_blocks)
 
     @classmethod
     def get(cls, path: str, strength: float, num_blocks: int = 28) -> "_Adapter":
@@ -310,6 +319,7 @@ class _Adapter:
         return _adapters[key]
 
     def install(self, diffusion_model: torch.nn.Module) -> None:
+        installed_count = 0
         for name, entry in self.weights.items():
             try:
                 module = diffusion_model.get_submodule(name)
@@ -322,6 +332,7 @@ class _Adapter:
                 installed = {}
                 setattr(module, HOOKS_ATTR, installed)
             if self.key in installed:
+                installed_count += 1
                 continue
 
             def hook(module, inputs, output, entry=entry, key=self.key):
@@ -334,6 +345,13 @@ class _Adapter:
                 return output + F.linear(F.linear(x, entry[0]), entry[1]) * entry[2]
 
             installed[self.key] = module.register_forward_hook(hook)
+            installed_count += 1
+
+        if installed_count == 0:
+            raise RuntimeError(
+                f"[Anima Ref Adapter] Failed to install any forward hooks into diffusion_model. "
+                f"The selected LoRA does not match Anima DiT architecture."
+            )
 
 
 def _frame_positions(t_index: int, height: int, width: int, h0: int, w0: int, device: torch.device):

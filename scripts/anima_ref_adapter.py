@@ -577,6 +577,17 @@ class AnimaRefAdapterForForge(scripts.Script):
         if not enable:
             return
 
+        sampler_name = (getattr(p, "sampler_name", "") or "").lower()
+        if any(bad in sampler_name for bad in ("sde", "ancestral", "euler a")):
+            logger.warning(
+                f"[Anima Ref Adapter] Stochastic sampler '{p.sampler_name}' detected! "
+                f"SDE/ancestral samplers inject random noise that degrades Flow Matching reference guidance into digital noise. "
+                f"Please switch to 'Euler' with 'Simple' schedule."
+            )
+            gr.Warning(
+                f"[Anima Ref Adapter] Sampler '{p.sampler_name}' produces digital noise! Switch to 'Euler' with 'Simple' schedule."
+            )
+
         dm = p.sd_model.forge_objects.unet.get_model_object("diffusion_model")
         if dm.__class__.__name__ != "Anima" and not getattr(dynamic_args, "anima", False):
             logger.warning(
@@ -594,6 +605,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                     f"[Anima Ref Adapter] Adapter LoRA '{lora_name}' not found. "
                     f"Download '{PILOT_LORA_FILENAME}' into your LoRA directory or click the Download button."
                 )
+                gr.Warning(f"[Anima Ref Adapter] LoRA '{lora_name}' not found.")
+                return
             else:
                 dynamic_args.ref_latents.clear()
 
@@ -616,16 +629,21 @@ class AnimaRefAdapterForForge(scripts.Script):
                 if include_ref_in_gallery:
                     self._last_letterboxed_ref = letterboxed_pil
 
-                config = AnimaRefAdapterConfig(
-                    lora_path=lora_path,
-                    strength=float(strength),
-                    ref_offset_h=float(ref_offset_h),
-                    ref_guidance=float(ref_guidance),
-                    correction=str(correction),
-                    rescale_phi=float(rescale_phi),
-                    fill=int(fill),
-                )
-                unet = patch_unet_for_anima_ref(unet, ref_latents, config)
+                try:
+                    config = AnimaRefAdapterConfig(
+                        lora_path=lora_path,
+                        strength=float(strength),
+                        ref_offset_h=float(ref_offset_h),
+                        ref_guidance=float(ref_guidance),
+                        correction=str(correction),
+                        rescale_phi=float(rescale_phi),
+                        fill=int(fill),
+                    )
+                    unet = patch_unet_for_anima_ref(unet, ref_latents, config)
+                except Exception as exc:
+                    logger.error(f"[Anima Ref Adapter] {exc}")
+                    gr.Warning(f"[Anima Ref Adapter] {exc}")
+                    return
 
                 p.extra_generation_params["Anima Ref Adapter LoRA"] = os.path.basename(lora_path)
                 p.extra_generation_params["Anima Ref Strength"] = float(strength)
