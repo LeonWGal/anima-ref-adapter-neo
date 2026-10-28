@@ -71,6 +71,41 @@ html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
     width: 100% !important;
 }
 
+/* Reference image metadata & utility buttons */
+.anima-ref-root .anima-ref-info p {
+    margin: 3px 0 2px 0 !important;
+    font-size: 11px !important;
+    line-height: 1.4 !important;
+    color: var(--body-text-color-subdued, #6b7280) !important;
+}
+
+.anima-ref-root .anima-util-row {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 6px !important;
+    width: 100% !important;
+}
+
+.anima-ref-root .anima-util-row button {
+    width: 100% !important;
+    font-size: 11.5px !important;
+    font-weight: 500 !important;
+    padding: 6px 4px !important;
+    text-align: center !important;
+    border-radius: 6px !important;
+    white-space: normal !important;
+    line-height: 1.25 !important;
+}
+
+.anima-ref-root .anima-action-feedback p {
+    margin: 2px 0 0 0 !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    color: #10b981 !important;
+    min-height: 16px !important;
+}
+
+/* LoRA row */
 .anima-ref-root .anima-lora-row {
     display: flex !important;
     align-items: flex-end !important;
@@ -82,6 +117,60 @@ html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
     min-width: 0 !important;
 }
 
+/* Presets header & segmented bar */
+.anima-ref-root .anima-presets-header {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: baseline !important;
+    margin-top: 2px !important;
+    margin-bottom: 2px !important;
+}
+
+.anima-ref-root .anima-presets-label p {
+    margin: 0 !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    color: var(--body-text-color, #374151) !important;
+}
+
+.anima-ref-root .anima-preset-badge p {
+    margin: 0 !important;
+    font-size: 11px !important;
+    color: var(--primary-500, var(--button-primary-background-fill, #2563eb)) !important;
+    font-weight: 600 !important;
+}
+
+.anima-ref-root .anima-presets-row {
+    display: flex !important;
+    gap: 4px !important;
+    background: var(--background-fill-secondary, #f3f4f6) !important;
+    border: 1px solid var(--border-color-primary, #e5e7eb) !important;
+    border-radius: 8px !important;
+    padding: 3px !important;
+}
+
+.anima-ref-root .anima-presets-row .anima-preset-btn {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    font-size: 11.5px !important;
+    font-weight: 500 !important;
+    padding: 5px 4px !important;
+    border-radius: 6px !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    color: var(--body-text-color, #374151) !important;
+    box-shadow: none !important;
+    cursor: pointer !important;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease !important;
+}
+
+.anima-ref-root .anima-presets-row .anima-preset-btn:hover {
+    background: var(--background-fill-primary, #ffffff) !important;
+    border-color: var(--border-color-primary, #d1d5db) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Sliders row */
 .anima-ref-root .anima-sliders-row {
     display: grid !important;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
@@ -89,23 +178,70 @@ html[data-lobe-forge="true"] .anima-ref-root .anima-workspace-row {
     align-items: end !important;
 }
 
-.anima-ref-root .anima-util-row,
-.anima-ref-root .anima-checks-row,
-.anima-ref-root .anima-presets-row {
-    display: flex !important;
-    flex-wrap: wrap !important;
-    gap: 6px !important;
-    align-items: center !important;
+.anima-ref-root .anima-sliders-row .gradio-slider label {
+    font-size: 12px !important;
+    white-space: nowrap !important;
 }
 
-.anima-ref-root .anima-util-row button,
-.anima-ref-root .anima-presets-row button {
-    flex: 1 1 auto !important;
-    min-width: fit-content !important;
+/* Segmented Guidance correction radio */
+.anima-ref-root .anima-segmented-radio .wrap {
+    display: flex !important;
+    gap: 4px !important;
+    width: 100% !important;
+}
+
+.anima-ref-root .anima-segmented-radio label {
+    flex: 1 1 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 5px 8px !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border-color-primary, #e5e7eb) !important;
+    background: var(--background-fill-secondary, #f9fafb) !important;
+    cursor: pointer !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    transition: all 0.15s ease !important;
+    color: var(--body-text-color, #4b5563) !important;
+}
+
+.anima-ref-root .anima-segmented-radio label:hover {
+    background: var(--background-fill-primary, #ffffff) !important;
+}
+
+.anima-ref-root .anima-segmented-radio label:has(input:checked),
+.anima-ref-root .anima-segmented-radio label.selected {
+    background: var(--button-primary-background-fill, #2563eb) !important;
+    color: var(--button-primary-text-color, #ffffff) !important;
+    border-color: var(--button-primary-border-color, #2563eb) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
+}
+
+.anima-ref-root .anima-segmented-radio label input[type="radio"] {
+    display: none !important;
+}
+
+/* Utilities, checks, status text */
+.anima-ref-root .anima-checks-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    align-items: center !important;
 }
 
 .anima-ref-root .anima-status-text p {
     margin: 2px 0 !important;
     font-size: 12px !important;
     opacity: 0.85;
+}
+
+.anima-ref-root .anima-sub-accordion {
+    border: 1px solid var(--border-color-primary, #e5e7eb) !important;
+    border-radius: 6px !important;
+    padding: 0 6px !important;
+    margin-top: 4px !important;
+    background: transparent !important;
 }

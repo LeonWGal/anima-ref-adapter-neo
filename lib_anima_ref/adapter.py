@@ -109,27 +109,55 @@ def _lora_search_dirs() -> list[str]:
     return dirs
 
 
-def list_lora_files() -> dict[str, str]:
+def is_anima_adapter(path: str) -> bool:
+    """Fast check whether a safetensors file contains Anima DiT blocks.* keys without loading tensors into RAM."""
+    if not path or not os.path.isfile(path) or not _is_valid_safetensors(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            header_len = struct.unpack("<Q", f.read(8))[0]
+            if header_len <= 0 or 8 + header_len > os.path.getsize(path):
+                return False
+            header = json.loads(f.read(header_len))
+        return any("blocks." in k for k in header.keys() if k != "__metadata__")
+    except Exception:
+        return False
+
+
+def list_lora_files(all_models: bool = False) -> dict[str, str]:
     """Return mapping of display name -> absolute path for available LoRA files.
 
-    Prioritizes files containing 'anima' or 'ref' at the top of the list.
+    By default, strictly includes only verified Anima adapter LoRAs (with Anima DiT blocks).
     """
     found: dict[str, str] = {}
     allowed_exts = (".safetensors", ".pt", ".ckpt")
     ext_models = _extension_models_dir()
 
+    # 1. Always include valid Anima files from the extension's own models folder
+    if os.path.isdir(ext_models):
+        for root, _, files in os.walk(ext_models):
+            for fname in files:
+                if fname.lower().endswith(allowed_exts):
+                    full = os.path.abspath(os.path.join(root, fname))
+                    if all_models or is_anima_adapter(full):
+                        rel = os.path.relpath(full, ext_models).replace("\\", "/")
+                        found[rel] = full
+
+    # 2. Add other search dirs (candidate filter on filename/folder, then verified with is_anima_adapter)
     for base_dir in _lora_search_dirs():
-        if not os.path.isdir(base_dir):
+        if base_dir == ext_models or not os.path.isdir(base_dir):
             continue
         for root, _, files in os.walk(base_dir, followlinks=True):
             for fname in files:
                 if not fname.lower().endswith(allowed_exts):
                     continue
+                name_lower = fname.lower()
+                if not all_models and not ("anima" in name_lower or "ref" in name_lower):
+                    continue
                 full_path = os.path.abspath(os.path.join(root, fname))
-                if base_dir == ext_models:
-                    rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
-                else:
-                    rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
+                if not all_models and not is_anima_adapter(full_path):
+                    continue
+                rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
                 if rel_path not in found:
                     found[rel_path] = full_path
 
@@ -140,9 +168,7 @@ def list_lora_files() -> dict[str, str]:
             and os.path.dirname(item[1]).replace("\\", "/").rstrip("/").endswith("sd-forge-anima-ref-adapter/models")
         )
         is_pilot = name_lower == PILOT_LORA_FILENAME.lower()
-        is_anima_ref = "anima" in name_lower and "ref" in name_lower
-        is_anima = "anima" in name_lower or "ref" in name_lower
-        return (not is_ext_pilot, not is_pilot, not is_anima_ref, not is_anima, name_lower)
+        return (not is_ext_pilot, not is_pilot, name_lower)
 
     return dict(sorted(found.items(), key=_sort_key))
 
@@ -150,6 +176,7 @@ def list_lora_files() -> dict[str, str]:
 def find_lora_path(lora_name: str) -> Optional[str]:
     """Resolve a LoRA dropdown selection, filename, or full path to an existing file."""
     ext_pilot = os.path.join(_extension_models_dir(), PILOT_LORA_FILENAME)
+
     if not lora_name:
         if os.path.isfile(ext_pilot) and _is_valid_safetensors(ext_pilot):
             return ext_pilot
@@ -157,13 +184,13 @@ def find_lora_path(lora_name: str) -> Optional[str]:
 
     # Check extension models first
     direct_ext = os.path.join(_extension_models_dir(), os.path.basename(lora_name))
-    if os.path.isfile(direct_ext) and _is_valid_safetensors(direct_ext):
+    if os.path.isfile(direct_ext) and is_anima_adapter(direct_ext):
         return direct_ext
 
-    if os.path.isfile(lora_name):
+    if os.path.isfile(lora_name) and is_anima_adapter(lora_name):
         return os.path.abspath(lora_name)
 
-    available = list_lora_files()
+    available = list_lora_files(all_models=False)
     if lora_name in available:
         return available[lora_name]
 
