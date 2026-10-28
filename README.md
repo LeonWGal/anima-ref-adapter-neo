@@ -35,7 +35,8 @@ The table below demonstrates zero-shot character transfer using Anima Ref Adapte
 - **Seamless Reference Conditioning:** Encodes the reference image via Wan 2.1 VAE with automatic letterboxing (`fill = 255`) and injects it as a second clean latent frame (`t = 0`).
 - **RoPE Height Shift (`RoPE Offset H = 1.0`):** Shifts the reference frame's position coordinates, transferring identity and art style without pinning the original pose.
 - **Multi-Reference Image Support (Up to 4 Slots):** Upload up to 4 reference images with individual slot weights and choose between:
-  - `Multi-Frame Attention`: Injects each reference as its own frame in the 3D DiT, enabling the model to attend concurrently to multiple angles, face closeups, and outfit details.
+  - `Stitch` (default): Glues all references into one reference sheet that matches the output resolution: uniform padding is trimmed, the best grid is picked automatically, and slot weights set cell width. The adapter sees a single image with several characters, which is what it handles natively, so different characters stay distinct instead of merging into clones. Ref 1 is the leftmost character.
+  - `Multi-Frame Attention`: Injects each reference as its own frame in the 3D DiT. Best for several angles, face close-ups, or outfit details of **one** character.
   - `Latent Blend`: Computes a weighted linear interpolation across reference latents before conditioning.
 - **Selective Adapter LoRA & Reference Guidance:** Applies pilot LoRA weights (`anima_ref_adapter_pilot_r32.safetensors`, rank 32) exclusively to reference branches (`pos`/`neg`) and unhooks them from the base branch, enabling high `Reference Guidance` (4.5–6.0).
 - **Anti-Burn Guidance Corrections:** Supports Adaptive Projected Guidance (`apg`) and CFG `rescale` to tame color saturation at high guidance values.

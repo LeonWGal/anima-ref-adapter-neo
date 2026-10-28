@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import struct
 import urllib.request
@@ -73,7 +74,7 @@ class AnimaRefAdapterConfig:
     correction: str = "apg"  # "apg", "rescale", "none"
     rescale_phi: float = 0.5
     fill: int = 255
-    combine_mode: str = "split_lr"  # "split_lr", "attention", "blend"
+    combine_mode: str = "stitch"  # "stitch", "attention", "blend"
 
 
 @dataclasses.dataclass
@@ -446,51 +447,6 @@ def _pick_ref(refs: list[torch.Tensor], size: tuple[int, int]) -> torch.Tensor:
     return resized.reshape(b, k, c, size[0], size[1]).permute(0, 2, 1, 3, 4)
 
 
-_mask_cache: dict[tuple, torch.Tensor] = {}
-
-
-def build_spatial_split_mask(
-    hp: int,
-    wp: int,
-    num_refs: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Build a spatial attention mask for multi-character generation.
-
-    Query canvas tokens on the left attend to Ref 1 and Canvas;
-    Query canvas tokens on the right attend to Ref 2 and Canvas.
-    For num_refs > 2, divides horizontally into equal segments with smooth margin overlap.
-    """
-    key = (hp, wp, num_refs, str(device), str(dtype))
-    cached = _mask_cache.get(key)
-    if cached is not None:
-        return cached
-
-    N = hp * wp
-    S = (1 + num_refs) * N
-    mask = torch.zeros((1, 1, S, S), dtype=dtype, device=device)
-    if num_refs < 2:
-        _mask_cache[key] = mask
-        return mask
-
-    x_coords = torch.arange(wp, device=device).repeat(hp)
-    margin = max(1, round(wp * 0.04))
-    step = wp / float(num_refs)
-
-    canvas_slice = mask[:, :, :N, :]
-    for ref_idx in range(num_refs):
-        left_bound = ref_idx * step - (margin if ref_idx > 0 else 0)
-        right_bound = (ref_idx + 1) * step + (margin if ref_idx < num_refs - 1 else 0)
-        ref_start = (1 + ref_idx) * N
-        ref_end = (2 + ref_idx) * N
-        canvas_blocked = (x_coords < left_bound) | (x_coords >= right_bound)
-        canvas_slice[:, :, canvas_blocked, ref_start:ref_end] = float("-inf")
-
-    _mask_cache[key] = mask
-    return mask
-
-
 def _ref_forward(
     dm,
     x: torch.Tensor,
@@ -499,7 +455,6 @@ def _ref_forward(
     refs: list[torch.Tensor],
     offset_ratio: float,
     transformer_options: dict,
-    combine_mode: str = "split_lr",
 ) -> torch.Tensor:
     """Anima DiT forward pass with reference latents (1 or more frames, timestep 0, shifted RoPE)."""
     orig_shape = list(x.shape)
@@ -537,35 +492,6 @@ def _ref_forward(
     t_emb = dm.t_embedding_norm(t_emb)
 
     transformer_options = (transformer_options or {}).copy()
-
-    # Split Left/Right spatial attention mask for 2 or more characters
-    if combine_mode == "split_lr" and num_refs >= 2:
-        split_mask = build_spatial_split_mask(hp, wp, num_refs, x.device, x_emb.dtype)
-        orig_attn_override = transformer_options.get("optimized_attention_override")
-
-        def _split_attn_override(func, *args, **kwargs):
-            # args: (q, k, v, heads)
-            if len(args) >= 4 and split_mask is not None:
-                q, k, v, heads = args[0], args[1], args[2], args[3]
-                # Self-attention check: sequence length of queries and keys matches S
-                if q.shape[2] == k.shape[2] and q.shape[2] == split_mask.shape[-1]:
-                    try:
-                        return func(*args, mask=split_mask.to(device=q.device, dtype=q.dtype), **kwargs)
-                    except Exception:
-                        b = q.shape[0]
-                        dim_head = q.shape[-1]
-                        out = torch.nn.functional.scaled_dot_product_attention(
-                            q, k, v, attn_mask=split_mask.to(device=q.device, dtype=q.dtype), dropout_p=0.0, is_causal=False
-                        )
-                        if not kwargs.get("skip_output_reshape", False):
-                            out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
-                        return out
-            if orig_attn_override is not None:
-                return orig_attn_override(func, *args, **kwargs)
-            return func(*args, **kwargs)
-
-        transformer_options["optimized_attention_override"] = _split_attn_override
-
     block_kwargs = {
         "rope_emb_L_1_1_D": rope.unsqueeze(1).unsqueeze(0),
         "adaln_lora_B_T_3D": adaln,
@@ -587,13 +513,7 @@ def _ref_forward(
     return out[:, :, : orig_shape[-3], : orig_shape[-2], : orig_shape[-1]]
 
 
-def _make_forward_wrapper(
-    dm,
-    orig_forward,
-    adapter: _Adapter,
-    offset_ratio: float,
-    combine_mode: str = "split_lr",
-):
+def _make_forward_wrapper(dm, orig_forward, adapter: _Adapter, offset_ratio: float):
     orig_forward = getattr(orig_forward, "_anima_ref_inner", orig_forward)
 
     def wrapped_forward(x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, padding_mask=None, **kwargs):
@@ -612,13 +532,118 @@ def _make_forward_wrapper(
                 refs,
                 offset_ratio,
                 kwargs.get("transformer_options", {}),
-                combine_mode=combine_mode,
             )
         finally:
             _active["key"] = previous
 
     wrapped_forward._anima_ref_inner = orig_forward
     return wrapped_forward
+
+
+def _flatten_alpha(src: Image.Image, fill: int) -> Image.Image:
+    if src.mode in ("RGBA", "LA") or (src.mode == "P" and "transparency" in src.info):
+        rgba = src.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (fill, fill, fill, 255))
+        return Image.alpha_composite(bg, rgba).convert("RGB")
+    return src.convert("RGB") if src.mode != "RGB" else src
+
+
+def _trim_background(img: Image.Image, fill: int, tolerance: int = 10, coverage: float = 0.985) -> Image.Image:
+    """Strip uniform padding borders (e.g. existing letterbox bars or a flat sheet background).
+
+    Scans inward from each edge and removes rows/columns where almost every pixel matches the corner
+    colour. Full-scene images have no such borders and are returned unchanged.
+    """
+    arr = np.asarray(img, dtype=np.int16)
+    h, w = arr.shape[:2]
+    if h < 16 or w < 16:
+        return img
+    corners = np.stack([arr[0, 0], arr[0, -1], arr[-1, 0], arr[-1, -1]])
+    spread = np.abs(corners - corners[0]).max()
+    if spread > tolerance * 2:
+        return img  # corners disagree -> not a flat background
+    bg_mask = np.abs(arr - corners.mean(axis=0)).max(axis=-1) <= tolerance
+    rows = bg_mask.mean(axis=1) >= coverage
+    cols = bg_mask.mean(axis=0) >= coverage
+
+    def _span(flags: np.ndarray) -> tuple[int, int]:
+        lo, hi = 0, len(flags)
+        while lo < hi and flags[lo]:
+            lo += 1
+        while hi > lo and flags[hi - 1]:
+            hi -= 1
+        return lo, hi
+
+    y0, y1 = _span(rows)
+    x0, x1 = _span(cols)
+    if y1 - y0 < h * 0.2 or x1 - x0 < w * 0.2:
+        return img
+    if (y0, y1, x0, x1) == (0, h, 0, w):
+        return img
+    pad = round(min(h, w) * 0.02)
+    return img.crop((max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad)))
+
+
+def stitch_reference_images(
+    images_with_weights: list[tuple[Image.Image, float]],
+    width: int,
+    height: int,
+    fill: int = 255,
+    gap_ratio: float = 0.02,
+    trim: bool = True,
+) -> Image.Image:
+    """Compose several references into one `width x height` sheet, like a single image with several characters.
+
+    Picks the grid layout (cols x rows) that gives the characters the most pixel area for their aspect
+    ratios. In a single row, cell widths follow the per-image weights, so a heavier reference gets more space.
+    Image order is preserved left-to-right, top-to-bottom (Ref 1 is the leftmost character).
+    """
+    fill = max(0, min(255, int(fill)))
+    imgs = [_flatten_alpha(img, fill) for img, _ in images_with_weights]
+    if trim:
+        imgs = [_trim_background(img, fill) for img in imgs]
+    weights = [max(0.05, float(w)) for _, w in images_with_weights]
+    n = len(imgs)
+    gap = round(min(width, height) * gap_ratio) if n > 1 else 0
+
+    def cells_for(cols: int, rows: int) -> list[tuple[int, int, int, int]]:
+        cells = []
+        cell_h = (height - gap * (rows - 1)) / rows
+        for r in range(rows):
+            row_items = list(range(r * cols, min(n, (r + 1) * cols)))
+            if not row_items:
+                break
+            row_w = [weights[i] for i in row_items] if rows == 1 else [1.0] * len(row_items)
+            avail = width - gap * (len(row_items) - 1)
+            total = sum(row_w)
+            x = 0.0
+            for i, rw in zip(row_items, row_w):
+                cw = avail * rw / total
+                cells.append((round(x), round(r * (cell_h + gap)), max(1, round(cw)), max(1, round(cell_h))))
+                x += cw + gap
+        return cells
+
+    best, best_score = None, -1.0
+    for rows in range(1, n + 1):
+        cols = math.ceil(n / rows)
+        if (rows - 1) * cols >= n:
+            continue
+        cells = cells_for(cols, rows)
+        score = 0.0
+        for img, (_, _, cw, ch) in zip(imgs, cells):
+            s = min(cw / img.width, ch / img.height)
+            score += img.width * img.height * s * s
+        if score > best_score:
+            best, best_score = cells, score
+
+    sheet = Image.new("RGB", (width, height), (fill, fill, fill))
+    for img, (x, y, cw, ch) in zip(imgs, best):
+        s = min(cw / img.width, ch / img.height)
+        size = (max(1, round(img.width * s)), max(1, round(img.height * s)))
+        resized = img.resize(size, Image.Resampling.LANCZOS)
+        # bottom-align so characters stand on a common ground line
+        sheet.paste(resized, (x + (cw - size[0]) // 2, y + ch - size[1]))
+    return sheet
 
 
 def letterbox_image(src: Image.Image, width: int, height: int, fill: int = 255) -> tuple[torch.Tensor, Image.Image]:
@@ -687,15 +712,21 @@ def encode_multi_reference_latents(
     width: int,
     height: int,
     fill: int = 255,
-    combine_mode: str = "split_lr",
+    combine_mode: str = "stitch",
 ) -> tuple[dict[str, torch.Tensor], list[Image.Image]]:
     """Letterbox and VAE-encode multiple reference images.
 
+    If combine_mode == 'stitch', composes all references into one sheet (one frame, as the adapter was trained).
     If combine_mode == 'blend', computes a weighted linear blend of the encoded latents.
-    If combine_mode in ('split_lr', 'attention'), stacks reference frames along dimension 2 (K frames).
+    If combine_mode == 'attention', stacks reference frames along dimension 2 (K frames).
     """
     if not images_with_weights:
         raise ValueError("No reference images provided.")
+
+    if combine_mode == "stitch" and len(images_with_weights) > 1:
+        sheet = stitch_reference_images(images_with_weights, width, height, fill)
+        lat_dict, lb_pil = encode_reference_latents(sheet, vae, width, height, fill)
+        return lat_dict, [lb_pil]
 
     all_refs: list[torch.Tensor] = []
     all_halfs: list[torch.Tensor] = []
@@ -768,7 +799,7 @@ def patch_unet_for_anima_ref(
     orig_forward = m.get_model_object("diffusion_model.forward")
     m.add_object_patch(
         "diffusion_model.forward",
-        _make_forward_wrapper(dm, orig_forward, adapter, config.ref_offset_h, config.combine_mode),
+        _make_forward_wrapper(dm, orig_forward, adapter, config.ref_offset_h),
     )
 
     ref_main = ref_latents["samples"]
