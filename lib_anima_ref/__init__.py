@@ -1,8 +1,14 @@
 from .adapter import (
+    HF_FILES,
+    HF_REPO,
     PILOT_LORA_FILENAME,
+    V2_LORA_FILENAME,
     AnimaRefAdapterConfig,
     AnimaSafePAGConfig,
+    _Adapter,
     _is_valid_safetensors,
+    build_asym_reference_image,
+    download_adapter_lora,
     download_pilot_lora,
     encode_multi_reference_latents,
     encode_reference_latents,
@@ -15,10 +21,16 @@ from .adapter import (
 )
 
 __all__ = [
+    "HF_FILES",
+    "HF_REPO",
     "PILOT_LORA_FILENAME",
+    "V2_LORA_FILENAME",
     "AnimaRefAdapterConfig",
     "AnimaSafePAGConfig",
+    "_Adapter",
     "_is_valid_safetensors",
+    "build_asym_reference_image",
+    "download_adapter_lora",
     "download_pilot_lora",
     "encode_multi_reference_latents",
     "encode_reference_latents",

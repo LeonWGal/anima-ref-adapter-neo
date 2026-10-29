@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import math
 import os
 import sys
@@ -13,12 +15,19 @@ EXT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if EXT_ROOT not in sys.path:
     sys.path.insert(0, EXT_ROOT)
 
+from backend import memory_management
 from backend.args import dynamic_args
 from lib_anima_ref import (
+    HF_FILES,
+    HF_REPO,
     PILOT_LORA_FILENAME,
+    V2_LORA_FILENAME,
     AnimaRefAdapterConfig,
     AnimaSafePAGConfig,
+    _Adapter,
     _is_valid_safetensors,
+    build_asym_reference_image,
+    download_adapter_lora,
     download_pilot_lora,
     encode_multi_reference_latents,
     encode_reference_latents,
@@ -31,8 +40,6 @@ from lib_anima_ref import (
 )
 from lib_anima_ref.adapter import logger
 from modules import scripts, shared
-from modules.api import api
-from modules.processing import Processed, StableDiffusionProcessing
 from modules.ui_components import FormRow, InputAccordion, ToolButton
 
 
@@ -52,6 +59,9 @@ def _is_lobe_theme_active() -> bool:
 
 def _default_lora_choice(choices: list[str]) -> Optional[str]:
     for c in choices:
+        if os.path.basename(c).lower() == V2_LORA_FILENAME.lower():
+            return c
+    for c in choices:
         if os.path.basename(c).lower() == PILOT_LORA_FILENAME.lower():
             return c
     for c in choices:
@@ -68,8 +78,14 @@ def _coerce_pil_image(img) -> Optional[Image.Image]:
         return img
     if isinstance(img, str):
         if os.path.isfile(img):
-            return Image.open(img)
-        return api.decode_base64_to_image(img)
+            try:
+                return Image.open(img)
+            except Exception:
+                pass
+        try:
+            return Image.open(io.BytesIO(base64.b64decode(img.split(",", 1)[-1])))
+        except Exception:
+            return None
     if isinstance(img, np.ndarray):
         return Image.fromarray(img)
     if isinstance(img, dict) and "image" in img:
@@ -95,6 +111,8 @@ class AnimaRefAdapterForForge(scripts.Script):
 
     def __init__(self):
         super().__init__()
+        self.cache: dict = {}
+        self.adapter: Optional[_Adapter] = None
         self._last_letterboxed_ref: Optional[Image.Image] = None
         self._last_letterboxed_list: list[Image.Image] = []
         self._tab_components: dict[str, dict[str, gr.components.Component]] = {
@@ -242,8 +260,8 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         lora_choices = list(list_lora_files().keys())
         default_lora = _default_lora_choice(lora_choices)
-        pilot_path = find_lora_path(default_lora or PILOT_LORA_FILENAME)
-        pilot_ok = bool(pilot_path and _is_valid_safetensors(pilot_path) and is_anima_adapter(pilot_path))
+        active_lora_path = find_lora_path(default_lora or V2_LORA_FILENAME)
+        lora_ok = bool(active_lora_path and _is_valid_safetensors(active_lora_path) and is_anima_adapter(active_lora_path))
 
         with InputAccordion(
             False,
@@ -261,7 +279,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                         ref_weights = []
                         with gr.Tabs(elem_classes=["anima-ref-tabs"]):
                             for idx in range(1, 5):
-                                tab_title = "Ref 1 (Main)" if idx == 1 else f"Ref {idx}"
+                                tab_title = "Ref 1 (Left / Main)" if idx == 1 else f"Ref {idx} (Right)" if idx == 2 else f"Ref {idx}"
                                 with gr.TabItem(tab_title, elem_id=self.elem_id(f"tab_ref{idx}")):
                                     img_comp = gr.Image(
                                         label=f"Reference {idx}",
@@ -295,8 +313,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 elem_id=self.elem_id("combine_mode"),
                                 elem_classes=["anima-segmented-radio"],
                                 tooltip=(
-                                    "stitch: glue all references into one sheet (Ref 1 = leftmost). Best for several different characters.\n"
-                                    "attention: each reference is its own frame. Best for several views of one character.\n"
+                                    "stitch: glue references side-by-side (Ref 1 on the left, Ref 2 on the right). Best for 2 characters!\n"
+                                    "attention: each reference is its own frame (pilot LoRA).\n"
                                     "blend: weighted latent blend."
                                 ),
                             )
@@ -342,18 +360,18 @@ class AnimaRefAdapterForForge(scripts.Script):
                             download_tool_btn = ToolButton(
                                 value="\u2b07",
                                 elem_id=self.elem_id("download_pilot_tool"),
-                                tooltip=f"Download or verify {PILOT_LORA_FILENAME}",
+                                tooltip=f"Download {V2_LORA_FILENAME} from Hugging Face",
                             )
 
                         download_btn = gr.Button(
-                            f"Download {PILOT_LORA_FILENAME}",
+                            f"Download {V2_LORA_FILENAME}",
                             size="sm",
-                            visible=not pilot_ok,
+                            visible=not lora_ok,
                             elem_id=self.elem_id("download_pilot"),
                         )
                         download_status = gr.Markdown(
-                            value="" if pilot_ok else f"`{PILOT_LORA_FILENAME}` not found in LoRA directory.",
-                            visible=not pilot_ok,
+                            value="" if lora_ok else f"`{default_lora or V2_LORA_FILENAME}` not found in models folder.",
+                            visible=not lora_ok,
                             elem_id=self.elem_id("lora_status"),
                             elem_classes=["anima-status-text"],
                         )
@@ -367,8 +385,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                             )
                         with gr.Row(elem_classes=["anima-presets-row"]):
                             btn_balanced = gr.Button("Balanced", size="sm", elem_classes=["anima-preset-btn"])
+                            btn_fast = gr.Button("Turbo / Fast", size="sm", elem_classes=["anima-preset-btn"])
                             btn_strong = gr.Button("Strong likeness", size="sm", elem_classes=["anima-preset-btn"])
-                            btn_soft = gr.Button("Soft / Pose", size="sm", elem_classes=["anima-preset-btn"])
                             btn_rescale = gr.Button("High guidance", size="sm", elem_classes=["anima-preset-btn"])
 
                         with gr.Row(elem_classes=["anima-sliders-row"]):
@@ -387,6 +405,27 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 step=0.1,
                                 label="Ref guidance",
                                 elem_id=self.elem_id("ref_guidance"),
+                                info="1 = faster, no guidance branch; higher = closer to reference",
+                            )
+
+                        with gr.Row(elem_classes=["anima-sliders-row"]):
+                            ref_end = gr.Slider(
+                                minimum=0.0,
+                                maximum=1.0,
+                                value=1.0,
+                                step=0.01,
+                                label="Ref guidance end",
+                                elem_id=self.elem_id("ref_end"),
+                                info="~0.6 is faster with virtually identical likeness",
+                            )
+                            ref_megapixels = gr.Slider(
+                                minimum=0.25,
+                                maximum=2.0,
+                                value=1.0,
+                                step=0.05,
+                                label="Ref size (MP)",
+                                elem_id=self.elem_id("ref_megapixels"),
+                                info="Resolution for v2 adapter (1.0 MP = 1024x1024 equivalent)",
                             )
 
                         with gr.Row(elem_classes=["anima-correction-row"]):
@@ -433,16 +472,16 @@ class AnimaRefAdapterForForge(scripts.Script):
                             with gr.Row(elem_classes=["anima-checks-row"]):
                                 preview_toggle = gr.Checkbox(
                                     value=False,
-                                    label="Preview letterbox",
+                                    label="Preview letterbox / sheet",
                                     elem_id=self.elem_id("preview_toggle"),
                                 )
                                 include_ref_in_gallery = gr.Checkbox(
                                     value=False,
-                                    label="Append letterbox to gallery",
+                                    label="Append reference sheet to gallery",
                                     elem_id=self.elem_id("include_ref_in_gallery"),
                                 )
                             letterbox_preview = gr.Image(
-                                label="Letterbox preview",
+                                label="Reference preview",
                                 show_label=False,
                                 type="pil",
                                 interactive=False,
@@ -573,35 +612,35 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         # Presets
         btn_balanced.click(
-            fn=lambda: (1.0, 4.5, "apg", 0.5, gr.update(visible=False), "**Balanced**"),
+            fn=lambda: (1.0, 4.5, 1.0, "apg", 0.5, gr.update(visible=False), "**Balanced**"),
             inputs=[],
-            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi, preset_status],
+            outputs=[strength, ref_guidance, ref_end, correction, rescale_phi, rescale_phi, preset_status],
+            queue=False,
+            show_progress=False,
+        )
+        btn_fast.click(
+            fn=lambda: (1.0, 4.5, 0.6, "apg", 0.5, gr.update(visible=False), "**Turbo / Fast**"),
+            inputs=[],
+            outputs=[strength, ref_guidance, ref_end, correction, rescale_phi, rescale_phi, preset_status],
             queue=False,
             show_progress=False,
         )
         btn_strong.click(
-            fn=lambda: (1.1, 6.0, "apg", 0.5, gr.update(visible=False), "**Strong likeness**"),
+            fn=lambda: (1.1, 6.0, 1.0, "apg", 0.5, gr.update(visible=False), "**Strong likeness**"),
             inputs=[],
-            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi, preset_status],
-            queue=False,
-            show_progress=False,
-        )
-        btn_soft.click(
-            fn=lambda: (0.85, 3.5, "apg", 0.5, gr.update(visible=False), "**Soft / Pose**"),
-            inputs=[],
-            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi, preset_status],
+            outputs=[strength, ref_guidance, ref_end, correction, rescale_phi, rescale_phi, preset_status],
             queue=False,
             show_progress=False,
         )
         btn_rescale.click(
-            fn=lambda: (1.0, 6.5, "rescale", 0.7, gr.update(visible=True), "**High guidance**"),
+            fn=lambda: (1.0, 6.5, 1.0, "rescale", 0.7, gr.update(visible=True), "**High guidance**"),
             inputs=[],
-            outputs=[strength, ref_guidance, correction, rescale_phi, rescale_phi, preset_status],
+            outputs=[strength, ref_guidance, ref_end, correction, rescale_phi, rescale_phi, preset_status],
             queue=False,
             show_progress=False,
         )
 
-        for sld in (strength, ref_guidance):
+        for sld in (strength, ref_guidance, ref_end):
             sld.release(fn=lambda: "*Custom*", inputs=[], outputs=[preset_status], queue=False)
 
         correction.change(
@@ -633,7 +672,7 @@ class AnimaRefAdapterForForge(scripts.Script):
             else:
                 return (
                     gr.update(visible=True),
-                    gr.update(value=f"`{selected_lora or PILOT_LORA_FILENAME}` not found.", visible=True),
+                    gr.update(value=f"`{selected_lora or V2_LORA_FILENAME}` not found.", visible=True),
                 )
 
         lora_name.change(
@@ -646,14 +685,13 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _refresh_loras(current_val):
             choices = list(list_lora_files().keys())
-            # Auto-select pilot lora if current selection is invalid or not an Anima adapter
             path = find_lora_path(current_val) if current_val else None
             val = current_val if (path and _is_valid_safetensors(path) and is_anima_adapter(path)) else _default_lora_choice(choices)
             valid = bool(val and find_lora_path(val) and is_anima_adapter(find_lora_path(val)))
             return (
                 gr.update(choices=choices, value=val),
                 gr.update(visible=not valid),
-                gr.update(value="" if valid else f"`{val or PILOT_LORA_FILENAME}` not found.", visible=not valid),
+                gr.update(value="" if valid else f"`{val or V2_LORA_FILENAME}` not found.", visible=not valid),
             )
 
         refresh_btn.click(
@@ -664,9 +702,9 @@ class AnimaRefAdapterForForge(scripts.Script):
             show_progress=False,
         )
 
-        def _download_pilot():
+        def _download_adapter():
             try:
-                dest, msg = download_pilot_lora()
+                dest, msg = download_adapter_lora(V2_LORA_FILENAME)
                 choices = list(list_lora_files().keys())
                 val = _default_lora_choice(choices)
                 return (
@@ -683,7 +721,7 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         for btn in (download_btn, download_tool_btn):
             btn.click(
-                fn=_download_pilot,
+                fn=_download_adapter,
                 inputs=[],
                 outputs=[lora_name, download_btn, download_status],
                 show_progress=True,
@@ -704,6 +742,8 @@ class AnimaRefAdapterForForge(scripts.Script):
             (lora_name, "Anima Ref Adapter LoRA"),
             (strength, "Anima Ref Strength"),
             (ref_guidance, "Anima Ref Guidance"),
+            (ref_end, "Anima Ref End"),
+            (ref_megapixels, "Anima Ref Megapixels"),
             (correction, "Anima Ref Correction"),
             (combine_mode, "Anima Ref Combine Mode"),
             (rescale_phi, "Anima Ref Rescale Phi"),
@@ -747,11 +787,13 @@ class AnimaRefAdapterForForge(scripts.Script):
             pag_rescale,
             pag_rescale_mode,
             pag_heads,
+            ref_end,
+            ref_megapixels,
         ]
 
     def process_before_every_sampling(
         self,
-        p: StableDiffusionProcessing,
+        p,
         enable: bool,
         ref_image1,
         ref_weight1: float,
@@ -779,6 +821,8 @@ class AnimaRefAdapterForForge(scripts.Script):
         pag_rescale: float,
         pag_rescale_mode: str,
         pag_heads: str,
+        ref_end: float = 1.0,
+        ref_megapixels: float = 1.0,
         *args,
         **kwargs,
     ):
@@ -824,7 +868,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                 bad_name = os.path.basename(lora_path) if lora_path else (lora_name or "None")
                 msg = (
                     f"Selected LoRA '{bad_name}' is not an Anima Reference Adapter. "
-                    f"Using it will produce digital noise. Please select '{PILOT_LORA_FILENAME}'."
+                    f"Using it will produce digital noise. Please select '{V2_LORA_FILENAME}'."
                 )
                 logger.error(f"[Anima Ref Adapter] {msg}")
                 raise gr.Error(f"[Anima Ref Adapter] {msg}")
@@ -842,6 +886,13 @@ class AnimaRefAdapterForForge(scripts.Script):
                 vae = p.sd_model.forge_objects.vae
                 if combine_mode not in ("stitch", "attention", "blend"):
                     combine_mode = "stitch"
+
+                # Check if adapter is v2 asymmetric
+                num_blocks = len(getattr(dm, "blocks", [])) or 28
+                adapter = _Adapter.get(lora_path, float(strength), num_blocks=num_blocks)
+                self.adapter = adapter
+                self.cache.clear()
+
                 ref_latents, letterboxed_list = encode_multi_reference_latents(
                     images_with_weights=active_refs,
                     vae=vae,
@@ -849,6 +900,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                     height=target_h,
                     fill=int(fill),
                     combine_mode=combine_mode,
+                    asym=adapter.asym,
+                    megapixels=float(ref_megapixels),
                 )
                 if include_ref_in_gallery:
                     self._last_letterboxed_list = letterboxed_list
@@ -864,8 +917,10 @@ class AnimaRefAdapterForForge(scripts.Script):
                         rescale_phi=float(rescale_phi),
                         fill=int(fill),
                         combine_mode=combine_mode,
+                        ref_end=float(ref_end),
+                        ref_megapixels=float(ref_megapixels),
                     )
-                    unet = patch_unet_for_anima_ref(unet, ref_latents, config)
+                    unet = patch_unet_for_anima_ref(unet, ref_latents, config, cache=self.cache)
                 except Exception as exc:
                     logger.error(f"[Anima Ref Adapter] {exc}")
                     gr.Warning(f"[Anima Ref Adapter] {exc}")
@@ -874,9 +929,12 @@ class AnimaRefAdapterForForge(scripts.Script):
                 p.extra_generation_params["Anima Ref Adapter LoRA"] = os.path.basename(lora_path)
                 p.extra_generation_params["Anima Ref Strength"] = float(strength)
                 p.extra_generation_params["Anima Ref Guidance"] = float(ref_guidance)
+                p.extra_generation_params["Anima Ref End"] = float(ref_end)
+                p.extra_generation_params["Anima Ref Megapixels"] = float(ref_megapixels)
                 p.extra_generation_params["Anima Ref Correction"] = str(correction)
                 p.extra_generation_params["Anima Ref Combine Mode"] = combine_mode
                 p.extra_generation_params["Anima Ref Images"] = len(active_refs)
+                p.extra_generation_params["Anima Ref Asym"] = bool(adapter.asym)
                 if str(correction).lower() == "rescale":
                     p.extra_generation_params["Anima Ref Rescale Phi"] = float(rescale_phi)
                 p.extra_generation_params["Anima Ref Offset H"] = float(ref_offset_h)
@@ -910,7 +968,14 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         p.sd_model.forge_objects.unet = unet
 
-    def postprocess(self, p: StableDiffusionProcessing, processed: Processed, *args):
+    def post_sample(self, p, ps, *args):
+        if self.adapter is not None:
+            self.cache.clear()
+            self.adapter.offload()
+            self.adapter = None
+            memory_management.soft_empty_cache()
+
+    def postprocess(self, p, processed, *args):
         if getattr(self, "_last_letterboxed_list", None):
             for lb in self._last_letterboxed_list:
                 processed.extra_images.append(lb)
