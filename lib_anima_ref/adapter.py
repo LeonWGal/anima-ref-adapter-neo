@@ -904,6 +904,25 @@ def encode_multi_reference_latents(
         raise ValueError("No reference images provided.")
 
     if asym:
+        if combine_mode == "blend" and len(images_with_weights) > 1:
+            base_w, base_h = images_with_weights[0][0].size
+            scale = (megapixels * 1024 * 1024 / max(1, base_w * base_h)) ** 0.5
+            target_size = (max(16, round(base_w * scale / 16) * 16), max(16, round(base_h * scale / 16) * 16))
+            all_refs = []
+            weights = [max(0.01, float(w)) for _, w in images_with_weights]
+            norm_w = [w / sum(weights) for w in weights]
+            preview_pils = []
+            for img, _ in images_with_weights:
+                p = _flatten_alpha(img, fill).resize(target_size, Image.Resampling.LANCZOS)
+                preview_pils.append(p)
+                pix = torch.from_numpy(np.asarray(p, dtype=np.float32) / 255.0).unsqueeze(0)
+                lat = vae.first_stage_model.process_in(vae.encode(pix)).detach().cpu()
+                if lat.ndim == 4:
+                    lat = lat.unsqueeze(2)
+                all_refs.append(lat)
+            blended = sum(r * w for r, w in zip(all_refs, norm_w))
+            return {"samples": blended}, preview_pils
+
         pixels, ref_pil = build_asym_reference_image(images_with_weights, megapixels, fill)
         ref = vae.encode(pixels)
         ref = vae.first_stage_model.process_in(ref).detach().cpu()
