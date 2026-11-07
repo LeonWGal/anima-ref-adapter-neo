@@ -41,7 +41,11 @@ HOOKS_ATTR = "_anima_ref_adapter_hooks"
 HF_REPO = "ElectronGirl/anima-ref-adapter"
 V2_LORA_FILENAME = "anima_ref_adapter_v2_r64.safetensors"
 PILOT_LORA_FILENAME = "anima_ref_adapter_pilot_r32.safetensors"
-HF_FILES = (V2_LORA_FILENAME, PILOT_LORA_FILENAME)
+SNAPREF_REPOS = {
+    "snapref_v1a.safetensors": "0ppxnhximxr/snapref-v1a",
+    "snapref_v1b.safetensors": "0ppxnhximxr/snapref-v1b",
+}
+HF_FILES = (V2_LORA_FILENAME, PILOT_LORA_FILENAME, *SNAPREF_REPOS)
 NO_REF_KEY = "anima_ref_off"
 
 _adapters: dict[tuple, "_Adapter"] = {}
@@ -116,6 +120,22 @@ def is_anima_adapter(path: str) -> bool:
         return False
 
 
+def snapref_metadata(handle) -> dict:
+    metadata = handle.metadata() or {}
+    data = json.loads(metadata.get("snapref") or metadata.get("anima_ref_kv") or "{}")
+    return data if isinstance(data, dict) and data.get("format") == "anima_ref_kv/1" else {}
+
+
+def is_snapref_adapter(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    try:
+        with safe_open(path, "pt") as handle:
+            return bool(snapref_metadata(handle))
+    except Exception:
+        return False
+
+
 def list_lora_files(all_models: bool = False) -> dict[str, str]:
     """Return mapping of display name -> absolute path for available LoRA files."""
     found: dict[str, str] = {}
@@ -183,6 +203,11 @@ def find_lora_path(lora_name: str) -> Optional[str]:
                 return p
         return None
 
+    if lora_name in SNAPREF_REPOS:
+        path = os.path.join(_extension_models_dir(), lora_name)
+        if _is_valid_safetensors(path):
+            return path
+
     for p in (ext_v2, ext_pilot):
         if (lora_name == os.path.basename(p) or lora_name == p) and os.path.isfile(p) and _is_valid_safetensors(p):
             return p
@@ -212,15 +237,17 @@ def _is_valid_safetensors(path: str) -> bool:
 
 
 def download_adapter_lora(filename: str = V2_LORA_FILENAME) -> tuple[str, str]:
-    """Download adapter safetensors (v2 or pilot) from Hugging Face directly into the extension models directory."""
+    """Download released adapter weights into the extension models directory."""
     if filename not in HF_FILES:
         filename = V2_LORA_FILENAME
     target_dir = _extension_models_dir()
     dest_path = os.path.join(target_dir, filename)
-    if is_anima_adapter(dest_path):
+    is_snapref = filename in SNAPREF_REPOS
+    if (is_snapref_adapter if is_snapref else is_anima_adapter)(dest_path):
         return dest_path, f"Verified in extension models folder: {dest_path}"
 
-    url = f"https://huggingface.co/{HF_REPO}/resolve/main/{filename}"
+    repo = SNAPREF_REPOS.get(filename, HF_REPO)
+    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
     tmp_path = None
     logger.info(f"[Anima Ref Adapter] Downloading {url} -> {dest_path} ...")
     try:
@@ -242,8 +269,11 @@ def download_adapter_lora(filename: str = V2_LORA_FILENAME) -> tuple[str, str]:
                     logger.info(f"[Anima Ref Adapter] Progress: {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB ({percent:.1f}%)")
 
         with safe_open(tmp_path, "pt") as handle:
-            if not any(key.startswith("diffusion_model.blocks.") for key in handle.keys()):
-                raise ValueError("Downloaded file does not contain Anima adapter weights.")
+            valid = bool(snapref_metadata(handle)) if is_snapref else any(
+                key.startswith("diffusion_model.blocks.") for key in handle.keys()
+            )
+            if not valid:
+                raise ValueError(f"Downloaded file does not contain {filename} adapter weights.")
         os.replace(tmp_path, dest_path)
         logger.info(f"[Anima Ref Adapter] Successfully downloaded {filename} ({os.path.getsize(dest_path)} bytes).")
         return dest_path, f"Successfully downloaded: {dest_path}"

@@ -36,8 +36,10 @@ from lib_anima_ref import (
     patch_unet_for_anima_ref,
     patch_unet_for_safe_pag,
 )
-from lib_anima_ref.adapter import logger
+from lib_anima_ref.adapter import SNAPREF_REPOS, is_snapref_adapter, logger
+from lib_anima_ref.snapref import encode_snapref_image, patch_unet_for_snapref
 from modules import scripts, shared
+from modules.prompt_parser import SdConditioning
 from modules.ui_components import FormRow, InputAccordion, ToolButton
 
 
@@ -292,7 +294,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                                         )
                                         ref_weights.append(w_comp)
 
-                        with gr.Row(elem_classes=["anima-multi-mode-row"]):
+                        with gr.Row(elem_classes=["anima-multi-mode-row"]) as combine_row:
                             combine_mode = gr.Radio(
                                 choices=["stitch", "attention", "blend"],
                                 value="stitch",
@@ -347,7 +349,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                             download_tool_btn = ToolButton(
                                 value="\u2b07",
                                 elem_id=self.elem_id("download_pilot_tool"),
-                                tooltip=f"Download {V2_LORA_FILENAME} from Hugging Face",
+                                tooltip="Download the selected adapter from Hugging Face",
                             )
 
                         download_btn = gr.Button(
@@ -363,20 +365,29 @@ class AnimaRefAdapterForForge(scripts.Script):
                             elem_classes=["anima-status-text"],
                         )
 
-                        with gr.Row(elem_classes=["anima-presets-header"]):
+                        snapref_mode = gr.Radio(
+                            choices=[("Character & Style", "cs"), ("Character", "char")],
+                            value="cs",
+                            label="SnapRef mode",
+                            info="Use one reference image. Set other reference weights to 0 to disable those slots.",
+                            visible=False,
+                            elem_id=self.elem_id("snapref_mode"),
+                        )
+
+                        with gr.Row(elem_classes=["anima-presets-header"]) as presets_header:
                             gr.Markdown("**Presets**", elem_classes=["anima-presets-label"])
                             preset_status = gr.Markdown(
                                 "**Balanced**",
                                 elem_id=self.elem_id("preset_status"),
                                 elem_classes=["anima-preset-badge"],
                             )
-                        with gr.Row(elem_classes=["anima-presets-row"]):
+                        with gr.Row(elem_classes=["anima-presets-row"]) as presets_row:
                             btn_balanced = gr.Button("Balanced", size="sm", elem_classes=["anima-preset-btn"])
                             btn_fast = gr.Button("Turbo / Fast", size="sm", elem_classes=["anima-preset-btn"])
                             btn_strong = gr.Button("Strong likeness", size="sm", elem_classes=["anima-preset-btn"])
                             btn_rescale = gr.Button("High guidance", size="sm", elem_classes=["anima-preset-btn"])
 
-                        with gr.Row(elem_classes=["anima-sliders-row"]):
+                        with gr.Row(elem_classes=["anima-sliders-row"]) as guidance_row:
                             strength = gr.Slider(
                                 minimum=0.0,
                                 maximum=2.0,
@@ -412,10 +423,10 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 step=0.05,
                                 label="Ref size (MP)",
                                 elem_id=self.elem_id("ref_megapixels"),
-                                info="Resolution for v2 adapter (1.0 MP = 1024x1024 equivalent)",
+                                info="Reference area for v2 and SnapRef (1.0 MP ≈ 1024 × 1024)",
                             )
 
-                        with gr.Row(elem_classes=["anima-correction-row"]):
+                        with gr.Row(elem_classes=["anima-correction-row"]) as correction_row:
                             correction = gr.Radio(
                                 choices=["apg", "rescale", "none"],
                                 value="apg",
@@ -438,7 +449,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                             open=False,
                             elem_id=self.elem_id("framing_accordion"),
                             elem_classes=["anima-sub-accordion"],
-                        ):
+                        ) as framing:
                             with gr.Row(elem_classes=["anima-sliders-row"]):
                                 fill = gr.Slider(
                                     minimum=0,
@@ -648,25 +659,27 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _on_lora_change(selected_lora):
             path = find_lora_path(selected_lora) if selected_lora else None
-            valid = is_anima_adapter(path)
+            snapref_file = is_snapref_adapter(path)
+            snapref = selected_lora in SNAPREF_REPOS or snapref_file
+            valid = snapref_file if snapref else is_anima_adapter(path)
+            released = selected_lora in HF_FILES
+            download = gr.update(value=f"Download {selected_lora}", visible=released and not valid)
             if valid:
-                return gr.update(visible=False), gr.update(value="", visible=False)
-            elif path and not is_anima_adapter(path):
-                return (
-                    gr.update(visible=True),
-                    gr.update(value=f"⚠️ `{os.path.basename(path)}` is not an Anima adapter. Digital noise will occur.", visible=True),
-                )
+                status = gr.update(value="", visible=False)
             else:
-                status = "downloads on first use" if selected_lora in HF_FILES else "was not found"
-                return (
-                    gr.update(visible=True),
-                    gr.update(value=f"`{selected_lora}` {status}.", visible=True),
-                )
+                detail = "downloads on first use" if released else "is unavailable or has an incompatible format"
+                status = gr.update(value=f"`{selected_lora}` {detail}.", visible=True)
+            return download, status, gr.update(visible=released), gr.update(visible=snapref), *(
+                gr.update(visible=not snapref) for _ in legacy_controls
+            )
+
+        legacy_controls = [combine_row, presets_header, presets_row, guidance_row, ref_end, correction_row, framing]
+        adapter_controls = [download_btn, download_status, download_tool_btn, snapref_mode, *legacy_controls]
 
         lora_name.change(
             fn=_on_lora_change,
             inputs=[lora_name],
-            outputs=[download_btn, download_status],
+            outputs=adapter_controls,
             queue=False,
             show_progress=False,
         )
@@ -674,27 +687,21 @@ class AnimaRefAdapterForForge(scripts.Script):
         def _refresh_loras(current_val):
             choices = _lora_choices()
             val = current_val if current_val in choices else V2_LORA_FILENAME
-            path = find_lora_path(val)
-            valid = is_anima_adapter(path)
-            return (
-                gr.update(choices=choices, value=val),
-                gr.update(visible=not valid),
-                gr.update(value="" if valid else f"`{val}` downloads on first use.", visible=not valid),
-            )
+            return gr.update(choices=choices, value=val), *_on_lora_change(val)
 
         refresh_btn.click(
             fn=_refresh_loras,
             inputs=[lora_name],
-            outputs=[lora_name, download_btn, download_status],
+            outputs=[lora_name, *adapter_controls],
             queue=False,
             show_progress=False,
         )
 
-        def _download_adapter():
+        def _download_adapter(selected_lora):
             try:
-                dest, _ = download_adapter_lora(V2_LORA_FILENAME)
+                dest, _ = download_adapter_lora(selected_lora)
                 return (
-                    gr.update(choices=_lora_choices(), value=V2_LORA_FILENAME),
+                    gr.update(choices=_lora_choices(), value=selected_lora),
                     gr.update(visible=False),
                     gr.update(value=f"Downloaded into extension folder: `{dest}`", visible=True),
                 )
@@ -708,7 +715,7 @@ class AnimaRefAdapterForForge(scripts.Script):
         for btn in (download_btn, download_tool_btn):
             btn.click(
                 fn=_download_adapter,
-                inputs=[],
+                inputs=[lora_name],
                 outputs=[lora_name, download_btn, download_status],
                 show_progress=True,
             )
@@ -730,6 +737,7 @@ class AnimaRefAdapterForForge(scripts.Script):
             (ref_guidance, "Anima Ref Guidance"),
             (ref_end, "Anima Ref End"),
             (ref_megapixels, "Anima Ref Megapixels"),
+            (snapref_mode, "Anima SnapRef Mode"),
             (correction, "Anima Ref Correction"),
             (combine_mode, "Anima Ref Combine Mode"),
             (rescale_phi, "Anima Ref Rescale Phi"),
@@ -775,6 +783,7 @@ class AnimaRefAdapterForForge(scripts.Script):
             pag_heads,
             ref_end,
             ref_megapixels,
+            snapref_mode,
         ]
 
     def process_before_every_sampling(
@@ -809,6 +818,7 @@ class AnimaRefAdapterForForge(scripts.Script):
         pag_heads: str,
         ref_end: float = 1.0,
         ref_megapixels: float = 1.0,
+        snapref_mode: str = "cs",
         *args,
         **kwargs,
     ):
@@ -841,7 +851,11 @@ class AnimaRefAdapterForForge(scripts.Script):
         if active_refs:
             lora_name = lora_name or V2_LORA_FILENAME
             lora_path = find_lora_path(lora_name)
-            lora_ok = is_anima_adapter(lora_path)
+            snapref_file = is_snapref_adapter(lora_path)
+            snapref = lora_name in SNAPREF_REPOS or snapref_file
+            if snapref and len(active_refs) != 1:
+                raise gr.Error("SnapRef uses one reference image. Keep one reference active.")
+            lora_ok = snapref_file if snapref else is_anima_adapter(lora_path)
             if lora_name in HF_FILES and not lora_ok:
                 try:
                     lora_path, _ = download_adapter_lora(lora_name)
@@ -856,8 +870,19 @@ class AnimaRefAdapterForForge(scripts.Script):
                 )
                 logger.error(f"[Anima Ref Adapter] {msg}")
                 raise gr.Error(f"[Anima Ref Adapter] {msg}")
+            dynamic_args.ref_latents.clear()
+            vae = p.sd_model.forge_objects.vae
+            if snapref:
+                try:
+                    ref, preview = encode_snapref_image(active_refs[0][0], vae, float(ref_megapixels), 255)
+                    context = p.sd_model.get_learned_conditioning(SdConditioning([""], is_negative_prompt=True))[0]
+                    unet = patch_unet_for_snapref(unet, ref, context, lora_path, snapref_mode, self.cache)
+                except Exception as exc:
+                    raise gr.Error(f"[SnapRef] {exc}") from exc
+                if include_ref_in_gallery:
+                    self._last_letterboxed_list = [preview]
+                p.extra_generation_params["Anima SnapRef Mode"] = snapref_mode
             else:
-                dynamic_args.ref_latents.clear()
 
                 x = kwargs.get("x")
                 if x is not None and hasattr(x, "shape") and len(x.shape) >= 4:
@@ -867,7 +892,6 @@ class AnimaRefAdapterForForge(scripts.Script):
                     target_w = int(p.hr_upscale_to_x if getattr(p, "is_hr_pass", False) else p.width)
                     target_h = int(p.hr_upscale_to_y if getattr(p, "is_hr_pass", False) else p.height)
 
-                vae = p.sd_model.forge_objects.vae
                 if combine_mode not in ("stitch", "attention", "blend"):
                     combine_mode = "stitch"
 
@@ -909,11 +933,9 @@ class AnimaRefAdapterForForge(scripts.Script):
                     gr.Warning(f"[Anima Ref Adapter] {exc}")
                     return
 
-                p.extra_generation_params["Anima Ref Adapter LoRA"] = os.path.basename(lora_path)
                 p.extra_generation_params["Anima Ref Strength"] = float(strength)
                 p.extra_generation_params["Anima Ref Guidance"] = float(ref_guidance)
                 p.extra_generation_params["Anima Ref End"] = float(ref_end)
-                p.extra_generation_params["Anima Ref Megapixels"] = float(ref_megapixels)
                 p.extra_generation_params["Anima Ref Correction"] = str(correction)
                 p.extra_generation_params["Anima Ref Combine Mode"] = combine_mode
                 p.extra_generation_params["Anima Ref Images"] = len(active_refs)
@@ -922,6 +944,8 @@ class AnimaRefAdapterForForge(scripts.Script):
                     p.extra_generation_params["Anima Ref Rescale Phi"] = float(rescale_phi)
                 p.extra_generation_params["Anima Ref Offset H"] = float(ref_offset_h)
                 p.extra_generation_params["Anima Ref Fill"] = int(fill)
+            p.extra_generation_params["Anima Ref Adapter LoRA"] = os.path.basename(lora_path)
+            p.extra_generation_params["Anima Ref Megapixels"] = float(ref_megapixels)
         else:
             if not pag_enable:
                 logger.warning("[Anima Ref Adapter] Enabled, but no reference image was provided.")
@@ -952,10 +976,13 @@ class AnimaRefAdapterForForge(scripts.Script):
         p.sd_model.forge_objects.unet = unet
 
     def _release_sampling_state(self):
+        had_cache = bool(self.cache)
         self.cache.clear()
         if self.adapter is not None:
             self.adapter.offload()
             self.adapter = None
+            had_cache = True
+        if had_cache:
             memory_management.soft_empty_cache()
 
     def post_sample(self, p, ps, *args):
