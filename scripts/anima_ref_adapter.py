@@ -20,12 +20,10 @@ from backend.args import dynamic_args
 from lib_anima_ref import (
     HF_FILES,
     HF_REPO,
-    PILOT_LORA_FILENAME,
     V2_LORA_FILENAME,
     AnimaRefAdapterConfig,
     AnimaSafePAGConfig,
     _Adapter,
-    _is_valid_safetensors,
     build_asym_reference_image,
     download_adapter_lora,
     download_pilot_lora,
@@ -57,18 +55,8 @@ def _is_lobe_theme_active() -> bool:
         return False
 
 
-def _default_lora_choice(choices: list[str]) -> Optional[str]:
-    for c in choices:
-        if os.path.basename(c).lower() == V2_LORA_FILENAME.lower():
-            return c
-    for c in choices:
-        if os.path.basename(c).lower() == PILOT_LORA_FILENAME.lower():
-            return c
-    for c in choices:
-        lower = os.path.basename(c).lower()
-        if "anima" in lower and "ref" in lower:
-            return c
-    return choices[0] if choices else None
+def _lora_choices() -> list[str]:
+    return list(dict.fromkeys((*HF_FILES, *list_lora_files())))
 
 
 def _coerce_pil_image(img) -> Optional[Image.Image]:
@@ -155,17 +143,17 @@ class AnimaRefAdapterForForge(scripts.Script):
             if action_feedback is not None:
                 outputs.append(action_feedback)
                 fn_sampler = lambda: (
-                    gr.update(value="Euler"),
+                    gr.update(value="ER SDE"),
                     gr.update(value="Simple"),
-                    gr.update(value=28),
+                    gr.update(value=30),
                     gr.update(value=4.5),
-                    gr.update(value="✓ Applied: Euler / Simple / 28 steps / CFG 4.5"),
+                    gr.update(value="✓ Applied: ER SDE / Simple / 30 steps / CFG 4.5"),
                 )
             else:
                 fn_sampler = lambda: (
-                    gr.update(value="Euler"),
+                    gr.update(value="ER SDE"),
                     gr.update(value="Simple"),
-                    gr.update(value=28),
+                    gr.update(value=30),
                     gr.update(value=4.5),
                 )
             wiring["apply_defaults_btn"].click(
@@ -258,10 +246,9 @@ class AnimaRefAdapterForForge(scripts.Script):
         lobe_active = _is_lobe_theme_active()
         theme_class = "anima-ui-lobe" if lobe_active else "anima-ui-classic"
 
-        lora_choices = list(list_lora_files().keys())
-        default_lora = _default_lora_choice(lora_choices)
-        active_lora_path = find_lora_path(default_lora or V2_LORA_FILENAME)
-        lora_ok = bool(active_lora_path and _is_valid_safetensors(active_lora_path) and is_anima_adapter(active_lora_path))
+        lora_choices = _lora_choices()
+        active_lora_path = find_lora_path(V2_LORA_FILENAME)
+        lora_ok = is_anima_adapter(active_lora_path)
 
         with InputAccordion(
             False,
@@ -329,7 +316,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 "⚡ Optimal Sampler",
                                 size="sm",
                                 elem_id=self.elem_id("apply_defaults"),
-                                tooltip="Set Euler sampler, Simple schedule, 28 steps, CFG 4.5",
+                                tooltip="Set ER SDE sampler, Simple schedule, 30 steps, CFG 4.5",
                             )
                             match_ar_btn = gr.Button(
                                 "📐 Match Aspect (~1MP)",
@@ -347,7 +334,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                         with FormRow(elem_classes=["anima-lora-row"]):
                             lora_name = gr.Dropdown(
                                 choices=lora_choices,
-                                value=default_lora,
+                                value=V2_LORA_FILENAME,
                                 label="Adapter LoRA",
                                 allow_custom_value=False,
                                 elem_id=self.elem_id("lora_name"),
@@ -370,7 +357,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                             elem_id=self.elem_id("download_pilot"),
                         )
                         download_status = gr.Markdown(
-                            value="" if lora_ok else f"`{default_lora or V2_LORA_FILENAME}` not found in models folder.",
+                            value="" if lora_ok else f"`{V2_LORA_FILENAME}` downloads on first use.",
                             visible=not lora_ok,
                             elem_id=self.elem_id("lora_status"),
                             elem_classes=["anima-status-text"],
@@ -416,7 +403,7 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 step=0.01,
                                 label="Ref guidance end",
                                 elem_id=self.elem_id("ref_end"),
-                                info="~0.6 is faster with virtually identical likeness",
+                                info="0.6 skips the extra guidance pass in later steps",
                             )
                             ref_megapixels = gr.Slider(
                                 minimum=0.25,
@@ -661,7 +648,7 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _on_lora_change(selected_lora):
             path = find_lora_path(selected_lora) if selected_lora else None
-            valid = bool(path and _is_valid_safetensors(path) and is_anima_adapter(path))
+            valid = is_anima_adapter(path)
             if valid:
                 return gr.update(visible=False), gr.update(value="", visible=False)
             elif path and not is_anima_adapter(path):
@@ -670,9 +657,10 @@ class AnimaRefAdapterForForge(scripts.Script):
                     gr.update(value=f"⚠️ `{os.path.basename(path)}` is not an Anima adapter. Digital noise will occur.", visible=True),
                 )
             else:
+                status = "downloads on first use" if selected_lora in HF_FILES else "was not found"
                 return (
                     gr.update(visible=True),
-                    gr.update(value=f"`{selected_lora or V2_LORA_FILENAME}` not found.", visible=True),
+                    gr.update(value=f"`{selected_lora}` {status}.", visible=True),
                 )
 
         lora_name.change(
@@ -684,14 +672,14 @@ class AnimaRefAdapterForForge(scripts.Script):
         )
 
         def _refresh_loras(current_val):
-            choices = list(list_lora_files().keys())
-            path = find_lora_path(current_val) if current_val else None
-            val = current_val if (path and _is_valid_safetensors(path) and is_anima_adapter(path)) else _default_lora_choice(choices)
-            valid = bool(val and find_lora_path(val) and is_anima_adapter(find_lora_path(val)))
+            choices = _lora_choices()
+            val = current_val if current_val in choices else V2_LORA_FILENAME
+            path = find_lora_path(val)
+            valid = is_anima_adapter(path)
             return (
                 gr.update(choices=choices, value=val),
                 gr.update(visible=not valid),
-                gr.update(value="" if valid else f"`{val or V2_LORA_FILENAME}` not found.", visible=not valid),
+                gr.update(value="" if valid else f"`{val}` downloads on first use.", visible=not valid),
             )
 
         refresh_btn.click(
@@ -704,11 +692,9 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         def _download_adapter():
             try:
-                dest, msg = download_adapter_lora(V2_LORA_FILENAME)
-                choices = list(list_lora_files().keys())
-                val = _default_lora_choice(choices)
+                dest, _ = download_adapter_lora(V2_LORA_FILENAME)
                 return (
-                    gr.update(choices=choices, value=val),
+                    gr.update(choices=_lora_choices(), value=V2_LORA_FILENAME),
                     gr.update(visible=False),
                     gr.update(value=f"Downloaded into extension folder: `{dest}`", visible=True),
                 )
@@ -826,21 +812,11 @@ class AnimaRefAdapterForForge(scripts.Script):
         *args,
         **kwargs,
     ):
+        self._release_sampling_state()
         self._last_letterboxed_ref = None
         self._last_letterboxed_list = []
         if not enable:
             return
-
-        sampler_name = (getattr(p, "sampler_name", "") or "").lower()
-        if any(bad in sampler_name for bad in ("sde", "ancestral", "euler a")):
-            logger.warning(
-                f"[Anima Ref Adapter] Stochastic sampler '{p.sampler_name}' detected! "
-                f"SDE/ancestral samplers inject random noise that degrades Flow Matching reference guidance into digital noise. "
-                f"Please switch to 'Euler' with 'Simple' schedule."
-            )
-            gr.Warning(
-                f"[Anima Ref Adapter] Sampler '{p.sampler_name}' produces digital noise! Switch to 'Euler' with 'Simple' schedule."
-            )
 
         dm = p.sd_model.forge_objects.unet.get_model_object("diffusion_model")
         if dm.__class__.__name__ != "Anima" and not getattr(dynamic_args, "anima", False):
@@ -863,8 +839,16 @@ class AnimaRefAdapterForForge(scripts.Script):
                 active_refs.append((pil, float(weight)))
 
         if active_refs:
+            lora_name = lora_name or V2_LORA_FILENAME
             lora_path = find_lora_path(lora_name)
-            if lora_path is None or not is_anima_adapter(lora_path):
+            lora_ok = is_anima_adapter(lora_path)
+            if lora_name in HF_FILES and not lora_ok:
+                try:
+                    lora_path, _ = download_adapter_lora(lora_name)
+                    lora_ok = True
+                except RuntimeError as exc:
+                    raise gr.Error(str(exc)) from exc
+            if not lora_ok:
                 bad_name = os.path.basename(lora_path) if lora_path else (lora_name or "None")
                 msg = (
                     f"Selected LoRA '{bad_name}' is not an Anima Reference Adapter. "
@@ -891,7 +875,6 @@ class AnimaRefAdapterForForge(scripts.Script):
                 num_blocks = len(getattr(dm, "blocks", [])) or 28
                 adapter = _Adapter.get(lora_path, float(strength), num_blocks=num_blocks)
                 self.adapter = adapter
-                self.cache.clear()
 
                 ref_latents, letterboxed_list = encode_multi_reference_latents(
                     images_with_weights=active_refs,
@@ -968,12 +951,15 @@ class AnimaRefAdapterForForge(scripts.Script):
 
         p.sd_model.forge_objects.unet = unet
 
-    def post_sample(self, p, ps, *args):
+    def _release_sampling_state(self):
+        self.cache.clear()
         if self.adapter is not None:
-            self.cache.clear()
             self.adapter.offload()
             self.adapter = None
             memory_management.soft_empty_cache()
+
+    def post_sample(self, p, ps, *args):
+        self._release_sampling_state()
 
     def postprocess(self, p, processed, *args):
         if getattr(self, "_last_letterboxed_list", None):

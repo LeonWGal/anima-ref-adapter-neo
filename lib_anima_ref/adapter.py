@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import os
-import struct
+import tempfile
 import urllib.request
 from types import MethodType
 from typing import Optional, Union
@@ -28,15 +28,14 @@ from safetensors import safe_open
 
 from backend import memory_management
 from backend.logging import setup_logger
-from backend.sampling.condition import Condition, repeat_to_batch_size
+from backend.sampling.condition import repeat_to_batch_size
 from backend.sampling.sampling_function import calc_cond_uncond_batch
 from backend.utils import load_torch_file, pad_to_patch_size
 
 logger = logging.getLogger("AnimaRefAdapter")
 setup_logger(logger)
 
-REF_KEY = "anima_ref_latent"
-REF_HALF_KEY = "anima_ref_latent_half"
+OPTIONS_REF_KEY = "anima_ref_adapter"
 HOOKS_ATTR = "_anima_ref_adapter_hooks"
 
 HF_REPO = "ElectronGirl/anima-ref-adapter"
@@ -107,16 +106,12 @@ def _lora_search_dirs() -> list[str]:
 
 
 def is_anima_adapter(path: str) -> bool:
-    """Fast check whether a safetensors file contains Anima DiT blocks.* keys without loading tensors into RAM."""
-    if not path or not os.path.isfile(path) or not _is_valid_safetensors(path):
+    """Check for Anima DiT blocks.* keys without loading the tensors."""
+    if not path or not os.path.isfile(path):
         return False
     try:
-        with open(path, "rb") as f:
-            header_len = struct.unpack("<Q", f.read(8))[0]
-            if header_len <= 0 or 8 + header_len > os.path.getsize(path):
-                return False
-            header = json.loads(f.read(header_len))
-        return any("blocks." in k for k in header.keys() if k != "__metadata__")
+        with safe_open(path, "pt") as handle:
+            return any("blocks." in key for key in handle.keys())
     except Exception:
         return False
 
@@ -204,25 +199,14 @@ def find_lora_path(lora_name: str) -> Optional[str]:
         if curr_base == target_base or os.path.splitext(curr_base)[0] == target_clean:
             return full
 
-    for p in (ext_v2, ext_pilot):
-        if os.path.isfile(p) and _is_valid_safetensors(p):
-            return p
     return None
 
 
 def _is_valid_safetensors(path: str) -> bool:
     """Verify that `path` is an existing, non-empty, valid safetensors file."""
     try:
-        if not os.path.isfile(path) or os.path.getsize(path) < 1024:
-            return False
-        with open(path, "rb") as f:
-            header_bytes = f.read(8)
-            if len(header_bytes) < 8:
-                return False
-            header_len = struct.unpack("<Q", header_bytes)[0]
-            if header_len <= 0 or (8 + header_len) > os.path.getsize(path):
-                return False
-        return True
+        with safe_open(path, "pt") as handle:
+            return bool(handle.keys())
     except Exception:
         return False
 
@@ -233,15 +217,18 @@ def download_adapter_lora(filename: str = V2_LORA_FILENAME) -> tuple[str, str]:
         filename = V2_LORA_FILENAME
     target_dir = _extension_models_dir()
     dest_path = os.path.join(target_dir, filename)
-    if os.path.isfile(dest_path) and _is_valid_safetensors(dest_path):
+    if is_anima_adapter(dest_path):
         return dest_path, f"Verified in extension models folder: {dest_path}"
 
     url = f"https://huggingface.co/{HF_REPO}/resolve/main/{filename}"
-    tmp_path = dest_path + ".download"
+    tmp_path = None
     logger.info(f"[Anima Ref Adapter] Downloading {url} -> {dest_path} ...")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Forge-Neo-Anima-Ref-Adapter/2.0"})
-        with urllib.request.urlopen(req) as response, open(tmp_path, "wb") as out_file:
+        with urllib.request.urlopen(req, timeout=60) as response, tempfile.NamedTemporaryFile(
+            dir=target_dir, prefix=f"{filename}.", suffix=".download", delete=False
+        ) as out_file:
+            tmp_path = out_file.name
             total = int(response.headers.get("Content-Length", 0))
             downloaded = 0
             while True:
@@ -254,13 +241,14 @@ def download_adapter_lora(filename: str = V2_LORA_FILENAME) -> tuple[str, str]:
                     percent = (downloaded / total) * 100.0
                     logger.info(f"[Anima Ref Adapter] Progress: {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB ({percent:.1f}%)")
 
-        if os.path.isfile(dest_path):
-            os.remove(dest_path)
-        os.rename(tmp_path, dest_path)
+        with safe_open(tmp_path, "pt") as handle:
+            if not any(key.startswith("diffusion_model.blocks.") for key in handle.keys()):
+                raise ValueError("Downloaded file does not contain Anima adapter weights.")
+        os.replace(tmp_path, dest_path)
         logger.info(f"[Anima Ref Adapter] Successfully downloaded {filename} ({os.path.getsize(dest_path)} bytes).")
         return dest_path, f"Successfully downloaded: {dest_path}"
     except Exception as exc:
-        if os.path.isfile(tmp_path):
+        if tmp_path and os.path.isfile(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
@@ -335,8 +323,9 @@ class _Adapter:
         self.ref_lora = self.metadata.get("ref_lora", True)
         slots = self.metadata.get("slots") or {}
         char_slot = slots.get("character") or {}
+        self.ref_t = int(char_slot.get("t", 1))
         self.offset_h = float(char_slot.get("offset_h", 1.0))
-        self.ref_cache: dict = {}
+        self.offset_w = int(char_slot.get("offset_w", 0))
 
         tensors = load_torch_file(path, safe_load=True)
         raw_weights: dict[str, list] = {}
@@ -384,7 +373,6 @@ class _Adapter:
         """Move weights back to CPU after sampling to release GPU VRAM."""
         for entry in self.weights.values():
             entry[0], entry[1] = entry[0].cpu(), entry[1].cpu()
-        self.ref_cache.clear()
 
     @classmethod
     def get(cls, path: str, strength: float, num_blocks: int = 28) -> "_Adapter":
@@ -460,9 +448,9 @@ def _rope(pe, t_index: int, height: int, width: int, h0: int, w0: int, device: t
     return _rope_from_positions(pe, t, h, w)
 
 
-def _frame_embed(dm, latent: torch.Tensor, t_index: int, h0: int, w0: int, sigma: torch.Tensor):
+def _frame_embed(dm, latent: torch.Tensor, t_index: int, h0: int, w0: int, sigma: torch.Tensor, padding_mask=None):
     """Patch embedding, RoPE and timestep embedding of one frame [B, C, 1, H, W]."""
-    x_emb, _, _ = dm.prepare_embedded_sequence(latent)
+    x_emb, _, _ = dm.prepare_embedded_sequence(latent, padding_mask=padding_mask)
     _, _, hp, wp, _ = x_emb.shape
     rope = _rope(dm.pos_embedder, t_index, hp, wp, h0, w0, latent.device)
     emb, adaln = dm.t_embedder[1](dm.t_embedder[0](sigma.reshape(-1, 1).float()).to(x_emb.dtype))
@@ -550,13 +538,16 @@ def encode_ref(dm, ref: torch.Tensor, offset: tuple[int, int]) -> list[tuple[tor
     return cache
 
 
-def asym_forward(dm, x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, ref_kv, options: dict) -> torch.Tensor:
+def asym_forward(dm, x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, ref_kv, options: dict, padding_mask=None) -> torch.Tensor:
     """Anima.forward for the target frame alone, attending to cached reference keys/values."""
     orig_shape = list(x.shape)
     x = pad_to_patch_size(x, (dm.patch_temporal, dm.patch_spatial, dm.patch_spatial))
-    xt, rope_t, emb_t, adaln_t = _frame_embed(dm, x[:, :, :1], 0, 0, 0, timesteps.reshape(x.shape[0], -1)[:, 0])
+    sigma = timesteps.reshape(x.shape[0], -1)[:, 0]
+    xt, rope_t, emb_t, adaln_t = _frame_embed(dm, x[:, :, :1], 0, 0, 0, sigma, padding_mask=padding_mask)
     batch = xt.shape[0]
-    for block, (k, v) in zip(dm.blocks, ref_kv):
+    options = options.copy()
+    for index, (block, (k, v)) in enumerate(zip(dm.blocks, ref_kv)):
+        options["block_index"] = index
         kv = (k.expand(batch, *k.shape[1:]), v.expand(batch, *v.shape[1:])) if k.shape[0] != batch else (k, v)
         xt, _, _ = _asym_block(block, xt, None, emb_t, None, adaln_t, None, context, rope_t, None, kv, options)
     out = dm.unpatchify(dm.final_layer(xt.to(context.dtype), emb_t, adaln_lora_B_T_3D=adaln_t))[:, :, :1]
@@ -615,8 +606,11 @@ def _ref_forward(
     timesteps: torch.Tensor,
     context: torch.Tensor,
     refs: list[torch.Tensor],
-    offset_ratio: float,
+    ref_t: int,
+    offset_h: float,
+    offset_w: int,
     transformer_options: dict,
+    padding_mask=None,
 ) -> torch.Tensor:
     """Anima DiT forward pass for pilot joint-attention."""
     orig_shape = list(x.shape)
@@ -632,12 +626,12 @@ def _ref_forward(
 
     num_refs = ref.shape[2]
     frames = torch.cat([x[:, :, :1], ref], dim=2)
-    x_emb, _, extra = dm.prepare_embedded_sequence(frames, padding_mask=None)
+    x_emb, _, extra = dm.prepare_embedded_sequence(frames, padding_mask=padding_mask)
     _, _, hp, wp, _ = x_emb.shape
 
     positions = [_frame_positions(0, hp, wp, 0, 0, x.device)]
     for _ in range(num_refs):
-        positions.append(_frame_positions(1, hp, wp, round(offset_ratio * hp), 0, x.device))
+        positions.append(_frame_positions(ref_t, hp, wp, round(offset_h * hp), offset_w, x.device))
     rope = _rope_from_positions(dm.pos_embedder, *(torch.cat(axis) for axis in zip(*positions)))
 
     timesteps = timesteps.reshape(x.shape[0], -1)[:, :1]
@@ -668,33 +662,6 @@ def _ref_forward(
     if was_4d:
         return out[:, :, 0, : orig_shape[-2], : orig_shape[-1]]
     return out[:, :, : orig_shape[-3], : orig_shape[-2], : orig_shape[-1]]
-
-
-def _make_forward_wrapper(dm, orig_forward, adapter: _Adapter, offset_ratio: float):
-    orig_forward = getattr(orig_forward, "_anima_ref_inner", orig_forward)
-
-    def wrapped_forward(x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, padding_mask=None, **kwargs):
-        refs = [r for r in (kwargs.pop(REF_KEY, None), kwargs.pop(REF_HALF_KEY, None)) if r is not None]
-        if not refs:
-            return orig_forward(x, timesteps, context, padding_mask=padding_mask, **kwargs)
-        adapter.install(dm)
-        previous = _active["key"]
-        _active["key"] = adapter.key
-        try:
-            return _ref_forward(
-                dm,
-                x,
-                timesteps,
-                context,
-                refs,
-                offset_ratio,
-                kwargs.get("transformer_options", {}),
-            )
-        finally:
-            _active["key"] = previous
-
-    wrapped_forward._anima_ref_inner = orig_forward
-    return wrapped_forward
 
 
 # endregion
@@ -983,168 +950,94 @@ def encode_multi_reference_latents(
 # endregion
 
 
-def _flat_dims(x: torch.Tensor) -> tuple[int, ...]:
-    return tuple(range(1, x.ndim))
-
-
 def patch_unet_for_anima_ref(
     unet,
     ref_latents: dict[str, torch.Tensor],
     config: AnimaRefAdapterConfig,
     cache: Optional[dict] = None,
 ):
-    """Clone `unet` and attach the Anima Ref Adapter LoRA and guidance logic."""
+    """Clone the UNet and attach reference attention and post-CFG guidance."""
     dm = unet.get_model_object("diffusion_model")
     blocks = getattr(dm, "blocks", None)
-    if blocks is None:
-        raise RuntimeError("Anima Ref Adapter requires an Anima diffusion model with `diffusion_model.blocks`.")
-
+    if not blocks:
+        raise RuntimeError("Anima Ref Adapter requires an Anima diffusion model with diffusion_model.blocks.")
     adapter = _Adapter.get(config.lora_path, config.strength, num_blocks=len(blocks))
     adapter.install(dm)
 
-    if adapter.asym:
-        # --- v2 Asymmetric Attention path ---
-        m = unet.clone()
-        ref = ref_latents["samples"]
-        if ref.ndim == 4:
-            ref = ref.unsqueeze(2)
-        tokens = (ref.shape[-2] // 2) * (ref.shape[-1] // 2)
-        kv_bytes = 2 * len(dm.blocks) * tokens * dm.blocks[0].x_dim * 2
-        m.add_extra_preserved_memory_during_sampling(kv_bytes + adapter.nbytes)
-
-        target_cache = cache if cache is not None else adapter.ref_cache
-
-        def ref_kv(model, x):
-            hp = -(-x.shape[-2] // model.diffusion_model.patch_spatial)
-            key = (id(model.diffusion_model), round(adapter.offset_h * config.ref_offset_h * hp), x.dtype, x.device)
-            if key not in target_cache:
-                target_cache.clear()
-                r = pad_to_patch_size(ref.to(device=x.device, dtype=x.dtype), (1, 2, 2))
-                previous = _active["key"]
-                _active["key"] = adapter.key if adapter.ref_lora else None
-                try:
-                    target_cache[key] = encode_ref(model.diffusion_model, r, (key[1], 0))
-                finally:
-                    _active["key"] = previous
-            return target_cache[key]
-
-        def model_wrapper(apply_model, args):
-            c = args["c"]
-            options = c.get("transformer_options", {})
-            if options.get(NO_REF_KEY):
-                return apply_model(args["input"], args["timestep"], **c)
-            model = apply_model.__self__
-            x, sigma = args["input"], args["timestep"]
-            dtype = model.computation_dtype
-            xc = model.predictor.calculate_input(sigma, x).to(dtype)
-            t = model.predictor.timestep(sigma).float()
-            context = c["c_crossattn"].to(dtype)
-            adapter.install(model.diffusion_model)
-            kv = ref_kv(model, xc)
-            previous = _active["key"]
-            _active["key"] = adapter.key
-            try:
-                out = asym_forward(model.diffusion_model, xc, t, context, kv, options).float()
-            finally:
-                _active["key"] = previous
-            return model.predictor.calculate_denoised(sigma, out, x)
-
-        def post_cfg(args):
-            guided, pos = args["denoised"], args["cond_denoised"]
-            model = args["model"]
-            sigma = float(args["sigma"].flatten()[0])
-            ref_end = float(getattr(config, "ref_end", 1.0))
-            if config.ref_guidance != 1.0 and (ref_end >= 1.0 or sigma >= float(model.predictor.percent_to_sigma(ref_end)) - 1e-5):
-                if math.isclose(args["cond_scale"], 1.0):
-                    cond, ref_pred = args["cond"], pos
-                else:
-                    cond, ref_pred = args["uncond"], args["uncond_denoised"]
-                options = args["model_options"].copy()
-                options["transformer_options"] = {**options.get("transformer_options", {}), NO_REF_KEY: True}
-                base, _ = calc_cond_uncond_batch(model, cond, None, args["input"], args["sigma"], options)
-                guided = guided + (config.ref_guidance - 1.0) * (ref_pred - base)
-            return _correct(guided, pos, config.correction, config.rescale_phi)
-
-        m.set_model_unet_function_wrapper(model_wrapper)
-        m.set_model_sampler_post_cfg_function(post_cfg)
-        return m
-
-    # --- Pilot Joint Temporal Attention path ---
     m = unet.clone()
-    m.add_extra_preserved_memory_during_sampling(128 * 1024 * 1024)
+    refs = [ref_latents["samples"]]
+    if (half := ref_latents.get("samples_half")) is not None:
+        refs.append(half)
+    ref = refs[0]
+    if ref.ndim == 4:
+        ref = ref.unsqueeze(2)
+    patch = (dm.patch_temporal, dm.patch_spatial, dm.patch_spatial)
+    if adapter.asym:
+        tokens = math.prod(-(-size // step) for size, step in zip(ref.shape[-3:], patch))
+        dtype_size = torch.empty((), dtype=unet.model.computation_dtype).element_size()
+        kv_bytes = 2 * len(blocks) * ref.shape[0] * tokens * blocks[0].x_dim * dtype_size
+        m.add_extra_preserved_memory_during_sampling(kv_bytes + adapter.nbytes)
+    else:
+        m.add_extra_preserved_memory_during_sampling(128 * 1024 * 1024)
 
+    target_cache = {} if cache is None else cache
+    offset_h = adapter.offset_h * config.ref_offset_h
+    patch_token = object()  # Only this patcher's calls should use its references on the shared model.
     orig_forward = m.get_model_object("diffusion_model.forward")
-    m.add_object_patch(
-        "diffusion_model.forward",
-        _make_forward_wrapper(dm, orig_forward, adapter, config.ref_offset_h),
-    )
+    orig_forward = getattr(orig_forward, "_anima_ref_inner", orig_forward)
 
-    ref_main = ref_latents["samples"]
-    ref_half = ref_latents.get("samples_half")
+    def wrapped_forward(x, timesteps, context, padding_mask=None, **kwargs):
+        options = kwargs.get("transformer_options") or {}
+        if options.get(OPTIONS_REF_KEY) is not patch_token or options.get(NO_REF_KEY):
+            return orig_forward(x, timesteps, context, padding_mask=padding_mask, **kwargs)
 
-    def conditioning_modifier(model, x, timestep, uncond, cond, cond_scale, model_options, seed):
-        model_options = model_options.copy()
+        adapter.install(dm)
+        previous = _active["key"]
+        try:
+            if adapter.asym:
+                target_rows = -(-x.shape[-2] // dm.patch_spatial)
+                offset = (round(offset_h * target_rows), adapter.offset_w)
+                key = (patch_token, offset, x.dtype, x.device)
+                if key not in target_cache:
+                    target_cache.clear()
+                    _active["key"] = adapter.key if adapter.ref_lora else None
+                    padded_ref = pad_to_patch_size(ref.to(x), patch)
+                    target_cache[key] = encode_ref(dm, padded_ref, offset)
+                _active["key"] = adapter.key
+                return asym_forward(dm, x, timesteps, context, target_cache[key], options, padding_mask=padding_mask)
 
-        uncond_base = []
-        if uncond is not None:
-            for item in uncond:
-                base_item = item.copy()
-                base_mc = item["model_conds"].copy()
-                base_mc.pop(REF_KEY, None)
-                base_mc.pop(REF_HALF_KEY, None)
-                base_item["model_conds"] = base_mc
-                uncond_base.append(base_item)
-        model_options["_anima_ref_uncond_base"] = uncond_base
+            _active["key"] = adapter.key
+            return _ref_forward(
+                dm, x, timesteps, context, refs, adapter.ref_t, offset_h, adapter.offset_w, options,
+                padding_mask=padding_mask,
+            )
+        finally:
+            _active["key"] = previous
 
-        def _attach_refs(cond_list):
-            if cond_list is None:
-                return None
-            out_list = []
-            for item in cond_list:
-                new_item = item.copy()
-                mc = item["model_conds"].copy()
-                mc[REF_KEY] = Condition(ref_main)
-                if ref_half is not None:
-                    mc[REF_HALF_KEY] = Condition(ref_half)
-                new_item["model_conds"] = mc
-                out_list.append(new_item)
-            return out_list
-
-        return model, x, timestep, _attach_refs(uncond), _attach_refs(cond), cond_scale, model_options, seed
-
-    m.add_conditioning_modifier(conditioning_modifier)
-
-    ref_guidance = float(config.ref_guidance)
-    correction = str(config.correction).lower()
-    rescale_phi = float(config.rescale_phi)
-    ref_end = float(getattr(config, "ref_end", 1.0))
-
-    def anima_ref_cfg_function(args: dict) -> torch.Tensor:
-        pos: torch.Tensor = args["cond_denoised"]
-        neg: torch.Tensor = args["uncond_denoised"]
-        x: torch.Tensor = args["input"]
-        timestep: torch.Tensor = args["timestep"]
-        cfg: float = float(args["cond_scale"])
-        model = args["model"]
-        model_options: dict = args["model_options"]
-
-        sigma = float(timestep.flatten()[0])
-        skip_guidance = ref_end < 1.0 and sigma < float(model.predictor.percent_to_sigma(ref_end)) - 1e-5
-
-        if ref_guidance != 1.0 and not skip_guidance:
-            uncond_base = model_options.get("_anima_ref_uncond_base")
-            if uncond_base:
-                _, base = calc_cond_uncond_batch(model, [], uncond_base, x, timestep, model_options)
+    def post_cfg(args):
+        guided, pos = args["denoised"], args["cond_denoised"]
+        model, sigma = args["model"], args["sigma"]
+        if config.ref_guidance != 1.0 and (
+            config.ref_end >= 1.0 or _sigma_to_float(sigma) >= model.predictor.percent_to_sigma(config.ref_end) - 1e-5
+        ):
+            options = args["model_options"].copy()
+            options["transformer_options"] = {**options.get("transformer_options", {}), NO_REF_KEY: True}
+            # Forge passes the original negative conditioning even when it skips CFG 1's negative pass.
+            if args["uncond"] and (
+                not math.isclose(args["cond_scale"], 1.0) or options.get("disable_cfg1_optimization")
+            ):
+                ref_pred = args["uncond_denoised"]
+                _, base = calc_cond_uncond_batch(model, [], args["uncond"], args["input"], sigma, options)
             else:
-                base = neg
-        else:
-            base = neg
+                ref_pred = pos
+                base, _ = calc_cond_uncond_batch(model, args["cond"], None, args["input"], sigma, options)
+            guided = guided + (config.ref_guidance - 1.0) * (ref_pred - base)
+        return _correct(guided, pos, config.correction, config.rescale_phi)
 
-        guided = base + ref_guidance * (neg - base) + cfg * (pos - neg)
-        guided = _correct(guided, pos, correction, rescale_phi)
-        return x - guided
-
-    m.set_model_sampler_cfg_function(anima_ref_cfg_function, disable_cfg1_optimization=True)
+    wrapped_forward._anima_ref_inner = orig_forward
+    m.add_object_patch("diffusion_model.forward", wrapped_forward)
+    m.set_transformer_option(OPTIONS_REF_KEY, patch_token)
+    m.set_model_sampler_post_cfg_function(post_cfg)
     return m
 
 
@@ -1248,21 +1141,26 @@ def _patch_anima_attention(blocks, indices: list[int], perturbation_strength: fl
         if attn is None or not hasattr(attn, "compute_attention"):
             raise RuntimeError(f"Block {idx} does not expose self_attn.compute_attention.")
         original = attn.compute_attention
+        had_override = "compute_attention" in attn.__dict__
         heads = _parse_optional_indices(head_indices, attn.n_heads - 1)
 
         def compute_attention(self, q, k, v, transformer_options=None, _orig=original, _str=perturbation_strength, _heads=heads):
-            if _str <= 0:
+            # The v2 reference stream calls attention without target transformer options.
+            if _str <= 0 or transformer_options is None:
                 return _orig(q, k, v, transformer_options=transformer_options or {})
             return _soft_pag_attention(self, q, k, v, _str, _heads)
 
         attn.compute_attention = MethodType(compute_attention, attn)
-        patched.append((attn, original))
+        patched.append((attn, original, had_override))
     return patched
 
 
 def _restore_attention(patched) -> None:
-    for attn, original in patched:
-        attn.compute_attention = original
+    for attn, original, had_override in patched:
+        if had_override:
+            attn.compute_attention = original
+        else:
+            del attn.compute_attention
 
 
 def _rescale_pag_guidance(

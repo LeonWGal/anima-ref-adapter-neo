@@ -2,7 +2,7 @@
 
 **Anima Ref Adapter** (`anima-ref-adapter-neo`) is a native extension for [Forge-Neo](https://github.com/Haoming02/sd-webui-forge-classic).
 
-It ports **[ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronGirl/ComfyUI-Anima-Ref-Adapter)** (v2 Asymmetric Architecture) and **[Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)** directly into Forge-Neo.
+It ports the v2 and Pilot adapters from ArcAnima and includes optional Anima Safe PAG. [ArcAnima upstream revision `99c222e`](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter/tree/99c222e1c2da472f4b514583b2dbd1b5afb4bdd9) · [Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)
 
 > **Character and style from reference images; pose, place, and framing from your prompt.**
 
@@ -22,10 +22,10 @@ It ports **[ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronG
   Reference images no longer require letterbox padding to canvas size. The reference is scaled cleanly via **Reference size (MP)** (default `1.0 MP`), preserving the image's native aspect ratio.
 - **👥 Two Characters Support (Side-by-Side):**
   Add **Ref 1 (Left)** and **Ref 2 (Right)**. The extension automatically aligns them side-by-side into a single reference stream. Simply specify in your prompt who is on the left and who is on the right (`1girl on the left, 1girl on the right, hugging`).
-- **⏱️ Denoising Window (`Ref guidance end`):**
-  Setting guidance cutoff to `~0.6` skips guidance evaluation in the late steps where overall identity is already locked in, achieving **~40% faster generation** with virtually identical likeness! Quick preset **Turbo / Fast** configures this in 1 click.
-- **🧹 Zero VRAM Leaks (Automatic Offloading):**
-  Reference KV caches (~1 GB at 1 MP) and adapter weights are automatically released from GPU VRAM in `post_sample`.
+- **⏱️ Denoising window (`Ref guidance end`)**
+  The **Turbo / Fast** preset sets the cutoff to `0.6` and skips the extra guidance evaluation in later steps. The reference still contributes throughout denoising.
+- **🧹 Automatic offloading**
+  After sampling, the extension clears the reference KV cache and moves the adapter weights back to CPU memory.
 - **🔄 Full Backward Compatibility:**
   Pilot adapter (`anima_ref_adapter_pilot_r32.safetensors`) and joint temporal attention continue to work seamlessly.
 
@@ -60,11 +60,11 @@ The table below demonstrates zero-shot character transfer using Anima Ref Adapte
   - `none`: Raw guidance difference.
 - **Presets with Instant Feedback:**
   - **Balanced:** Strength 1.0, Guidance 4.5, End 1.0, APG
-  - **Turbo / Fast:** Strength 1.0, Guidance 4.5, End 0.6, APG (~40% faster)
+  - **Turbo / Fast** sets Strength 1.0, Guidance 4.5, End 0.6, and APG.
   - **Strong likeness:** Strength 1.1, Guidance 6.0, End 1.0, APG
   - **High guidance:** Strength 1.0, Guidance 6.5, End 1.0, Rescale 0.7
 - **Optional Anima Safe PAG:** Perturbed-Attention Guidance on Anima DiT blocks for crisper line art and fine details.
-- **Workflow Shortcuts:** 1-click optimal sampler configuration (`Euler`, `Simple`, `28 steps`, `CFG 4.5`), `~1MP` aspect ratio matching, and live reference preview.
+- **Workflow shortcuts** apply `ER SDE`, `Simple`, 30 steps, and CFG 4.5, match the canvas to the reference aspect ratio at about 1 MP, and show a reference preview.
 
 ---
 
@@ -88,13 +88,11 @@ git clone https://github.com/LeonWGal/anima-ref-adapter-neo sd-forge-anima-ref-a
 
 ## Adapter Weights
 
-Download the v2 adapter safetensors **[`anima_ref_adapter_v2_r64.safetensors`](https://huggingface.co/ElectronGirl/anima-ref-adapter/blob/main/anima_ref_adapter_v2_r64.safetensors)** (Rank 64, ~183 MB) and place it into:
+Select the v2 or Pilot adapter in **Adapter LoRA**. Forge-Neo downloads the selected weights on the first generation that uses a reference if the file is missing. You can also download the v2 weights from the panel or place the file in the extension's `models` folder. [v2 adapter weights on Hugging Face](https://huggingface.co/ElectronGirl/anima-ref-adapter/blob/main/anima_ref_adapter_v2_r64.safetensors)
+
 ```text
 extensions/sd-forge-anima-ref-adapter/models/anima_ref_adapter_v2_r64.safetensors
 ```
-*(Or simply click the download button in the extension interface — it will automatically download and verify the weights directly into the extension models directory.)*
-
-The pilot adapter (`anima_ref_adapter_pilot_r32.safetensors`) is also supported.
 
 ---
 
@@ -104,10 +102,10 @@ The pilot adapter (`anima_ref_adapter_pilot_r32.safetensors`) is also supported.
 |---|---|---|
 | **Model** | Anima Base v1.0 / `rdbtAnima` | Standard prompt LoRAs `<lora:...>` work normally |
 | **Adapter LoRA** | `anima_ref_adapter_v2_r64.safetensors` | Upstream v2 asymmetric adapter |
-| **Sampler / Scheduler** | `Euler`, `Simple` / `Normal`, `28–32` steps | Avoid stochastic samplers (SDE, Ancestral) to prevent digital noise |
+| **Sampler / Scheduler** | `ER SDE` or `Euler`, `Simple`, 30 steps | ArcAnima uses `ER SDE` for the v2 examples |
 | **CFG Scale** | `4.0 – 4.5` | Main text CFG |
-| **Reference Guidance** | `4.5 – 6.0` | `1.0` = normal CFG; `4.5–6.0` = strong identity & style lock |
-| **Guidance End (`ref_end`)** | `0.6 – 1.0` | `0.6` provides ~40% faster generation with identical output |
+| **Reference Guidance** | `4.5` | `1.0` skips the extra guidance pass and still uses the reference |
+| **Guidance End (`ref_end`)** | `1.0` | `0.6` skips the extra guidance pass in later steps |
 | **Reference Size (`ref_megapixels`)** | `1.0 MP` | Native reference resolution |
 | **Guidance Correction** | `apg` | Or `rescale` (`Rescale Phi = 0.5`) to prevent over-saturation |
 | **RoPE Offset H** | `1.0` | Training default |
