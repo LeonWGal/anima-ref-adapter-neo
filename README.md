@@ -2,7 +2,7 @@
 
 **Anima Ref Adapter** (`anima-ref-adapter-neo`) is a native extension for [Forge-Neo](https://github.com/Haoming02/sd-webui-forge-classic).
 
-It supports the v2 and Pilot adapters, SnapRef v1a and v1b, and optional Anima Safe PAG. [Anima Ref Adapter upstream revision `99c222e`](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter/tree/99c222e1c2da472f4b514583b2dbd1b5afb4bdd9) · [SnapRef](https://github.com/ArcAnima/SnapRef) · [Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)
+It supports the v2 and Pilot adapters, SnapRef v1a and v1b, the SnapRef v2a-pre1 and v2a-pre2 previews, and optional Anima Safe PAG. [Anima Ref Adapter upstream revision `99c222e`](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter/tree/99c222e1c2da472f4b514583b2dbd1b5afb4bdd9) · [SnapRef](https://github.com/ArcAnima/SnapRef) · [Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)
 
 > **Character and style from reference images; pose, place, and framing from your prompt.**
 
@@ -96,7 +96,7 @@ extensions/sd-forge-anima-ref-adapter/models/anima_ref_adapter_v2_r64.safetensor
 
 ## Use SnapRef
 
-1. Select **`snapref_v1a.safetensors`** or **`snapref_v1b.safetensors`** in **Adapter LoRA**. If the BF16 weights are missing, the extension downloads them on first use. [SnapRef v1a weights](https://huggingface.co/0ppxnhximxr/snapref-v1a) · [SnapRef v1b weights](https://huggingface.co/0ppxnhximxr/snapref-v1b)
+1. Select a SnapRef file in **Adapter LoRA**. The list includes v1a and v1b in BF16, plus v2a-pre1 and v2a-pre2 in BF16 and FP8. The extension downloads missing files on first use. It converts FP8 weights to BF16 at load time. [SnapRef v1a](https://huggingface.co/0ppxnhximxr/snapref-v1a) · [SnapRef v1b](https://huggingface.co/0ppxnhximxr/snapref-v1b) · [SnapRef v2a-pre1](https://huggingface.co/0ppxnhximxr/snapref-v2a-pre1) · [SnapRef v2a-pre2](https://huggingface.co/0ppxnhximxr/snapref-v2a-pre2)
 2. Load one reference image and select **Character & Style** or **Character** in **SnapRef mode**. In **Character** mode, use the prompt to describe the style.
 3. Generate with an Anima checkpoint. SnapRef applies the reference to the positive CFG branch and caps the reference resolution at **Ref size (MP)**.
 

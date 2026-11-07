@@ -1,4 +1,4 @@
-"""SnapRef v1 inference adapted from ArcAnima/SnapRef (Apache-2.0)."""
+"""SnapRef inference adapted from ArcAnima/SnapRef (Apache-2.0)."""
 
 from __future__ import annotations
 
@@ -24,6 +24,19 @@ _BASE_BLOCKS_IN_29B = (
 )
 
 
+def _read_lora_matrix(handle, key: str) -> torch.Tensor:
+    matrix = handle.get_tensor(key)
+    if matrix.dtype == torch.bfloat16:
+        return matrix
+    if matrix.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"Unsupported SnapRef tensor dtype {matrix.dtype} for {key}.")
+
+    scale = handle.get_tensor(f"{key}_scale")
+    if scale.dtype != torch.float32 or scale.shape != (matrix.shape[0], 1):
+        raise ValueError(f"Expected one FP32 scale per row for SnapRef tensor {key}.")
+    return (matrix.float() * scale).to(torch.bfloat16)
+
+
 @lru_cache(maxsize=2)
 def _load_weights(path: str, mtime_ns: int):
     weights = {}
@@ -36,10 +49,8 @@ def _load_weights(path: str, mtime_ns: int):
                 continue
             stem = key.removesuffix(".lora_down")
             _, stream, module = stem.split(".", 2)
-            down = handle.get_tensor(key)
-            up = handle.get_tensor(stem + ".lora_up")
-            if down.dtype != torch.bfloat16 or up.dtype != torch.bfloat16:
-                raise ValueError("Select the BF16 SnapRef weights.")
+            down = _read_lora_matrix(handle, key)
+            up = _read_lora_matrix(handle, stem + ".lora_up")
             scale = float(handle.get_tensor(stem + ".alpha")) / down.shape[0]
             weights.setdefault(module, {})[stream] = down, up, scale
         mode_embed = handle.get_tensor("anima_ref_kv.mode_embed")

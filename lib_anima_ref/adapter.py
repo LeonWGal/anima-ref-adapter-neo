@@ -44,6 +44,10 @@ PILOT_LORA_FILENAME = "anima_ref_adapter_pilot_r32.safetensors"
 SNAPREF_REPOS = {
     "snapref_v1a.safetensors": "0ppxnhximxr/snapref-v1a",
     "snapref_v1b.safetensors": "0ppxnhximxr/snapref-v1b",
+    "snapref_v2a_pre1.safetensors": "0ppxnhximxr/snapref-v2a-pre1",
+    "snapref_v2a_pre1_fp8.safetensors": "0ppxnhximxr/snapref-v2a-pre1",
+    "snapref_v2a_pre2.safetensors": "0ppxnhximxr/snapref-v2a-pre2",
+    "snapref_v2a_pre2_fp8.safetensors": "0ppxnhximxr/snapref-v2a-pre2",
 }
 HF_FILES = (V2_LORA_FILENAME, PILOT_LORA_FILENAME, *SNAPREF_REPOS)
 NO_REF_KEY = "anima_ref_off"
