@@ -10,6 +10,9 @@
             el.classList.toggle("anima-ui-lobe", isLobe);
             el.classList.toggle("anima-ui-classic", !isLobe);
         });
+        document.querySelectorAll(".anima-ref-root :is(.anima-status-text, .anima-ref-info, .anima-action-feedback)").forEach((el) => {
+            el.setAttribute("role", "status");
+        });
     }
 
     if (typeof onUiLoaded === "function") {

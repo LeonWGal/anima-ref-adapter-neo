@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 
 from backend import memory_management
 from backend.logging import setup_logger
@@ -43,14 +43,23 @@ V2_LORA_FILENAME = "anima_ref_adapter_v2_r64.safetensors"
 PILOT_LORA_FILENAME = "anima_ref_adapter_pilot_r32.safetensors"
 SNAPREF_REPOS = {
     "snapref_v1a.safetensors": "0ppxnhximxr/snapref-v1a",
+    "snapref_v1a_fp8.safetensors": "0ppxnhximxr/snapref-v1a",
     "snapref_v1b.safetensors": "0ppxnhximxr/snapref-v1b",
+    "snapref_v1b_fp8.safetensors": "0ppxnhximxr/snapref-v1b",
     "snapref_v2a_pre1.safetensors": "0ppxnhximxr/snapref-v2a-pre1",
     "snapref_v2a_pre1_fp8.safetensors": "0ppxnhximxr/snapref-v2a-pre1",
     "snapref_v2a_pre2.safetensors": "0ppxnhximxr/snapref-v2a-pre2",
     "snapref_v2a_pre2_fp8.safetensors": "0ppxnhximxr/snapref-v2a-pre2",
 }
 HF_FILES = (V2_LORA_FILENAME, PILOT_LORA_FILENAME, *SNAPREF_REPOS)
+SNAPREF_STABLE_URLS = {
+    "snapref_v2a.safetensors": "https://civitai.com/api/download/models/3457619?fileId=3358798",
+    "snapref_v2a_fp8.safetensors": "https://civitai.com/api/download/models/3457619?fileId=3361791",
+}
+SNAPREF_FILES = (*SNAPREF_STABLE_URLS, *SNAPREF_REPOS)
+DOWNLOADABLE_FILES = (V2_LORA_FILENAME, PILOT_LORA_FILENAME, *SNAPREF_FILES)
 NO_REF_KEY = "anima_ref_off"
+ATTENTION_BIAS_KEY = "anima_ref_attention_bias"
 
 _adapters: dict[tuple, "_Adapter"] = {}
 _active = {"key": None}
@@ -140,6 +149,17 @@ def is_snapref_adapter(path: Optional[str]) -> bool:
         return False
 
 
+def anima_ref_metadata(path: Optional[str]) -> dict:
+    if not path:
+        return {}
+    try:
+        with safe_open(path, "pt") as handle:
+            metadata = json.loads((handle.metadata() or {}).get("anima_ref_adapter", "{}"))
+    except (OSError, ValueError, RuntimeError, SafetensorError):
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def list_lora_files(all_models: bool = False) -> dict[str, str]:
     """Return mapping of display name -> absolute path for available LoRA files."""
     found: dict[str, str] = {}
@@ -207,7 +227,7 @@ def find_lora_path(lora_name: str) -> Optional[str]:
                 return p
         return None
 
-    if lora_name in SNAPREF_REPOS:
+    if lora_name in SNAPREF_FILES:
         path = os.path.join(_extension_models_dir(), lora_name)
         if _is_valid_safetensors(path):
             return path
@@ -216,19 +236,23 @@ def find_lora_path(lora_name: str) -> Optional[str]:
         if (lora_name == os.path.basename(p) or lora_name == p) and os.path.isfile(p) and _is_valid_safetensors(p):
             return p
 
-    if os.path.isabs(lora_name) and os.path.isfile(lora_name) and _is_valid_safetensors(lora_name):
-        return lora_name
+    if os.path.isabs(lora_name):
+        return lora_name if _is_valid_safetensors(lora_name) else None
 
     target_base = os.path.basename(lora_name).lower()
     target_clean = os.path.splitext(target_base)[0]
-    for rel, full in list_lora_files(all_models=True).items():
-        if rel == lora_name or full == lora_name:
-            return full
+    models = list_lora_files(all_models=True)
+    if lora_name in models:
+        return models[lora_name]
+    if os.path.dirname(lora_name):
+        return None
+    matches = []
+    for rel, full in models.items():
         curr_base = os.path.basename(rel).lower()
         if curr_base == target_base or os.path.splitext(curr_base)[0] == target_clean:
-            return full
+            matches.append(full)
 
-    return None
+    return matches[0] if len(matches) == 1 else None
 
 
 def _is_valid_safetensors(path: str) -> bool:
@@ -242,16 +266,16 @@ def _is_valid_safetensors(path: str) -> bool:
 
 def download_adapter_lora(filename: str = V2_LORA_FILENAME) -> tuple[str, str]:
     """Download released adapter weights into the extension models directory."""
-    if filename not in HF_FILES:
-        filename = V2_LORA_FILENAME
+    if filename not in DOWNLOADABLE_FILES:
+        raise ValueError(f"No download is configured for adapter {filename!r}.")
     target_dir = _extension_models_dir()
     dest_path = os.path.join(target_dir, filename)
-    is_snapref = filename in SNAPREF_REPOS
+    is_snapref = filename in SNAPREF_FILES
     if (is_snapref_adapter if is_snapref else is_anima_adapter)(dest_path):
         return dest_path, f"Verified in extension models folder: {dest_path}"
 
     repo = SNAPREF_REPOS.get(filename, HF_REPO)
-    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+    url = SNAPREF_STABLE_URLS.get(filename, f"https://huggingface.co/{repo}/resolve/main/{filename}")
     tmp_path = None
     logger.info(f"[Anima Ref Adapter] Downloading {url} -> {dest_path} ...")
     try:
@@ -345,14 +369,7 @@ class _Adapter:
         self.path = path
         self.strength = float(strength)
 
-        # Inspect adapter metadata for v2 / asymmetric architecture
-        self.metadata = {}
-        try:
-            with safe_open(path, "pt") as handle:
-                self.metadata = json.loads((handle.metadata() or {}).get("anima_ref_adapter", "{}"))
-        except Exception:
-            self.metadata = {}
-
+        self.metadata = anima_ref_metadata(path)
         self.asym = self.metadata.get("arch") == "asym"
         self.ref_lora = self.metadata.get("ref_lora", True)
         slots = self.metadata.get("slots") or {}
@@ -1121,11 +1138,12 @@ def _parse_optional_indices(text: Optional[str], max_index: int) -> Optional[lis
     return _parse_indices(text, max_index)
 
 
-def _sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+def _sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias=None) -> torch.Tensor:
     return F.scaled_dot_product_attention(
         q.transpose(1, 2),
         k.transpose(1, 2),
         v.transpose(1, 2),
+        attn_mask=bias,
         dropout_p=0.0,
         is_causal=False,
     ).transpose(1, 2)
@@ -1161,8 +1179,9 @@ def _soft_pag_attention(
     v: torch.Tensor,
     strength: float,
     heads: Optional[list[int]],
+    bias=None,
 ) -> torch.Tensor:
-    normal = _sdpa_attention(q, k, v)
+    normal = _sdpa_attention(q, k, v, bias)
     weak = _lerp_heads(normal, v, strength, heads)
     return _project_attention(attn_module, weak)
 
@@ -1180,9 +1199,12 @@ def _patch_anima_attention(blocks, indices: list[int], perturbation_strength: fl
 
         def compute_attention(self, q, k, v, transformer_options=None, _orig=original, _str=perturbation_strength, _heads=heads):
             # The v2 reference stream calls attention without target transformer options.
-            if _str <= 0 or transformer_options is None:
+            if transformer_options is None:
                 return _orig(q, k, v, transformer_options=transformer_options or {})
-            return _soft_pag_attention(self, q, k, v, _str, _heads)
+            bias = transformer_options.get(ATTENTION_BIAS_KEY)
+            if _str <= 0 and bias is None:
+                return _orig(q, k, v, transformer_options=transformer_options)
+            return _soft_pag_attention(self, q, k, v, _str, _heads, bias)
 
         attn.compute_attention = MethodType(compute_attention, attn)
         patched.append((attn, original, had_override))
