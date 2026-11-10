@@ -1,137 +1,66 @@
-# Anima Ref Adapter for Forge-Neo
+# Anima Ref Adapter for Forge Neo
 
-**Anima Ref Adapter** (`anima-ref-adapter-neo`) is a native extension for [Forge-Neo](https://github.com/Haoming02/sd-webui-forge-classic).
+English | [Русский](README.ru-RU.md)
 
-It supports the v2 and Pilot adapters, SnapRef v1a, v1b and v2a, and optional Anima Safe PAG. [Anima Ref Adapter upstream revision `99c222e`](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter/tree/99c222e1c2da472f4b514583b2dbd1b5afb4bdd9) · [SnapRef](https://github.com/ArcAnima/SnapRef) · [Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)
-
-> **Character and style from reference images; pose, place, and framing from your prompt.**
-
-<p align="center">
-  <img src="assets/ui-preview.png" alt="Anima Ref Adapter UI in Forge-Neo" width="620" />
-  <br>
-  <em>Interface running in Forge-Neo with the <a href="https://github.com/LeonWGal/lobe-theme-neo">Lobe Theme Neo</a> theme.</em>
-</p>
-
----
-
-## What's New in v2 (Asymmetric Attention)
-
-- **⚡ ~2x Faster Generation & Cached Reference KV:**
-  In the new v2 architecture (`arch: "asym"`), reference tokens attend only to themselves and skip cross-attention. Reference Key and Value projections across all DiT blocks are computed **once** at the start of generation and cached for all sampling steps and CFG branches.
-- **🖼️ Arbitrary Reference Aspect Ratios & Resolutions:**
-  Reference images no longer require letterbox padding to canvas size. The reference is scaled cleanly via **Reference size (MP)** (default `1.0 MP`), preserving the image's native aspect ratio.
-- **👥 Two Characters Support (Side-by-Side):**
-  Add **Ref 1 (Left)** and **Ref 2 (Right)**. The extension automatically aligns them side-by-side into a single reference stream. Simply specify in your prompt who is on the left and who is on the right (`1girl on the left, 1girl on the right, hugging`).
-- **⏱️ Denoising window (`Ref guidance end`)**
-  The **Turbo / Fast** preset sets the cutoff to `0.6` and skips the extra guidance evaluation in later steps. The reference still contributes throughout denoising.
-- **🧹 Automatic offloading**
-  After sampling, the extension clears the reference KV cache and moves the adapter weights back to CPU memory.
-- **🔄 Full Backward Compatibility:**
-  Pilot adapter (`anima_ref_adapter_pilot_r32.safetensors`) and joint temporal attention continue to work seamlessly.
-
----
-
-## Comparison & Examples
-
-The table below demonstrates zero-shot character transfer using Anima Ref Adapter:
-* **Reference Image:** Generated using model **`betterDaysIllustrious`** (`betterDaysIllustriousXL_illuXLV02BAKEDVAE`).
-* **Outputs:** Rendered using model **`rdbtAnima`** (`rdbtAnima_v30BaseSma_fp16`) with Anima Ref Adapter (Strength 1.0, Ref Guidance 4.5, APG).
-
-> [!TIP]
-> Notice how the generated images don't require character appearance tags in the prompt — identity, hair, outfit cues, and art style are transferred automatically from the reference image, while the prompt guides only the pose and action!
-
-| Input Reference (`betterDaysIllustrious`) | Output 1 (`rdbtAnima`) | Output 2 (`rdbtAnima`) | Output 3 (`rdbtAnima`) |
-| :---: | :---: | :---: | :---: |
-| <img src="assets/ref_betterdays_input.png" width="230" alt="Reference betterDaysIllustrious" /> | <img src="assets/output_rdbtanima_wariza.png" width="230" alt="Output rdbtAnima Wariza" /> | <img src="assets/output_rdbtanima_yoga.png" width="230" alt="Output rdbtAnima Yoga" /> | <img src="assets/output_rdbtanima_punch.png" width="230" alt="Output rdbtAnima Punch" /> |
-| **Original Reference**<br/>*(betterDaysIllustrious)* | **`wariza, 1girl`**<br/>*(rdbtAnima)* | **`yoga pants, yoga, 1girl`**<br/>*(rdbtAnima)* | **`punching viewer, 1girl`**<br/>*(rdbtAnima)* |
-
----
+Generate new scenes with Anima in Forge Neo while carrying over a character's appearance and, optionally, art style from reference images. Choose an Anima Ref or SnapRef adapter in txt2img or img2img, then use the prompt to describe the scene.
 
 ## Features
 
-- **Asymmetric Reference Cross-Attention (v2):** Reads reference appearance tokens shifted by one target height below the target grid (`RoPE Offset H = 1.0`), preventing pose copying while preserving identity.
-- **Multi-Reference Image Modes:**
-  - `Stitch` (default & recommended): Glues references side-by-side (Ref 1 on left, Ref 2 on right). Perfect for dual-character scenes!
-  - `Multi-Frame Attention`: Injects each reference as its own frame in the 3D DiT (pilot LoRA).
-  - `Latent Blend`: Computes a weighted linear interpolation across reference latents.
-- **Anti-Burn Guidance Corrections:**
-  - `apg` (Adaptive Projected Guidance, default): Removes guidance components parallel to conditional prediction to prevent over-saturation.
-  - `rescale`: CFG rescale mode with customizable `Rescale Phi` (default 0.5).
-  - `none`: Raw guidance difference.
-- **Presets with Instant Feedback:**
-  - **Balanced:** Strength 1.0, Guidance 4.5, End 1.0, APG
-  - **Turbo / Fast** sets Strength 1.0, Guidance 4.5, End 0.6, and APG.
-  - **Strong likeness:** Strength 1.1, Guidance 6.0, End 1.0, APG
-  - **High guidance:** Strength 1.0, Guidance 6.5, End 1.0, Rescale 0.7
-- **Optional Anima Safe PAG:** Perturbed-Attention Guidance on Anima DiT blocks for crisper line art and fine details.
-- **Workflow shortcuts** apply `ER SDE`, `Simple`, 30 steps, and CFG 4.5, match the canvas to the reference aspect ratio at about 1 MP, and show a reference preview.
+- Up to four reference slots with individual weights. Set a slot's weight to `0` to skip it.
+- SnapRef modes for transferring character and style together or focusing on character appearance.
+- A panel that shows the selected adapter's settings and stacks the controls on narrow screens.
+- Optional Anima Safe PAG, guidance presets for Anima Ref, and canvas and sampler shortcuts.
 
----
+## Supported adapters
+
+Use an Anima checkpoint with its text encoder and VAE configured in Forge Neo. Choose the reference weights separately in **Adapter LoRA**.
+
+| Adapter | Weights | Reference layouts |
+| --- | --- | --- |
+| Anima Ref v2 | `anima_ref_adapter_v2_r64.safetensors` | Side by side, Latent blend |
+| Anima Ref Pilot | `anima_ref_adapter_pilot_r32.safetensors` | Side by side, Latent blend, Separate frames |
+| SnapRef | v2a stable, v2a-pre1, v2a-pre2, v1a, and v1b in BF16 and FP8 | Separate, Side by side |
+
+The extension converts SnapRef FP8 weights to BF16 at load time. SnapRef supports the 28-block Anima layout and maps its weights to the original blocks in the known 40-block Anima 2.9B layout. [Anima model files](https://huggingface.co/circlestone-labs/Anima) · [Anima Ref weights](https://huggingface.co/ElectronGirl/anima-ref-adapter) · [SnapRef releases](https://github.com/ArcAnima/SnapRef#quick-start) · [SnapRef v2a stable files](https://civitai.com/models/3028191/snapref?modelVersionId=3457619)
 
 ## Installation
 
-### Method 1: Via Forge-Neo Extensions Tab
-1. Open Forge-Neo WebUI -> **Extensions** -> **Install from URL**.
-2. Paste:
-   ```text
-   https://github.com/LeonWGal/anima-ref-adapter-neo
-   ```
-3. Click **Install**, then **Apply and restart UI**.
+1. In Forge Neo, open **Extensions** and select **Install from URL**.
+2. Enter `https://github.com/LeonWGal/anima-ref-adapter-neo` and select **Install**.
+3. Restart Forge Neo.
 
-### Method 2: Manual Clone
+For a manual install, run this command from the Forge Neo `extensions` directory, then restart Forge Neo.
+
 ```bash
-cd <Forge-Neo-Root>/extensions
 git clone https://github.com/LeonWGal/anima-ref-adapter-neo sd-forge-anima-ref-adapter
 ```
 
----
+## Quick start
 
-## Adapter Weights
+1. Select an Anima checkpoint and open **Anima Ref Adapter** in txt2img or img2img.
+2. Select an adapter in **Adapter LoRA**. Use **Download weights** to fetch the file in advance. The extension also fetches missing listed weights when you generate with a reference. For manual installs, put the adapter file in the extension's `models` directory and select **Refresh**.
+3. Upload or paste a reference into **Ref 1**. A check mark appears on the slot and its weight control becomes available.
+4. With SnapRef, choose **Character & Style** or **Character**. In **Character** mode, describe the desired style in the prompt.
+5. Describe the new scene and generate. Enable **Show processed references in gallery** to inspect the images the adapter received.
 
-Select the v2 or Pilot adapter in **Adapter LoRA**. Forge-Neo downloads the selected weights on the first generation that uses a reference if the file is missing. You can also download the v2 weights from the panel or place the file in the extension's `models` folder. [v2 adapter weights on Hugging Face](https://huggingface.co/ElectronGirl/anima-ref-adapter/blob/main/anima_ref_adapter_v2_r64.safetensors)
+For multiple views of one character, use SnapRef **Separate** and adjust each slot's weight. **Ref size (MP)** limits each reference individually in this layout. For two characters, use **Side by side**, order the images by slot, and describe who appears on the left and right.
 
-```text
-extensions/sd-forge-anima-ref-adapter/models/anima_ref_adapter_v2_r64.safetensors
-```
+**Canvas & sampler** contains the shortcuts. **Apply sampler preset** sets ER SDE, Simple, 30 steps, and CFG 4.5. **Match canvas to reference** sets the aspect ratio from the first active reference at about 1 MP.
 
-## Use SnapRef
+## Examples
 
-1. Select a SnapRef file in **Adapter LoRA**. The list includes v2a stable, v2a-pre1, v2a-pre2, v1a, and v1b in BF16 and FP8. The extension downloads missing files on first use and converts FP8 weights to BF16 at load time. [SnapRef v2a stable](https://civitai.com/models/3028191/snapref?modelVersionId=3457619) · [Other SnapRef releases](https://github.com/ArcAnima/SnapRef#quick-start)
-2. Load up to four reference images and select **Character & Style** or **Character**. In **Character** mode, use the prompt to describe the style.
-3. Choose **Separate** to combine views of one character with per-image weights. Each image uses its own **Ref size (MP)** limit. Choose **Side by side** to combine the images on one canvas, and describe the characters' left-to-right order in the prompt. In either layout, set a weight to `0` to skip a slot.
-4. Generate with an Anima checkpoint. SnapRef applies the reference to the positive CFG branch.
+These images demonstrate pose changes with **Anima Ref Pilot** on `rdbtAnima_v30BaseSma_fp16`. Each output uses its own seed. The PNGs include their generation settings.
 
----
+| Input reference | Sitting | Yoga | Punching |
+| --- | --- | --- | --- |
+| ![Reference generated with betterDaysIllustrious](assets/ref_betterdays_input.png) | ![The reference character sitting](assets/output_rdbtanima_wariza.png) | ![The reference character doing yoga](assets/output_rdbtanima_yoga.png) | ![The reference character punching toward the viewer](assets/output_rdbtanima_punch.png) |
 
-## Recommended Generation Settings
+## Model testing
 
-| Setting | Recommended Value | Notes |
-|---|---|---|
-| **Model** | Anima Base v1.0 / `rdbtAnima` | Standard prompt LoRAs `<lora:...>` work normally |
-| **Adapter LoRA** | `anima_ref_adapter_v2_r64.safetensors` | Upstream v2 asymmetric adapter |
-| **Sampler / Scheduler** | `ER SDE` or `Euler`, `Simple`, 30 steps | ArcAnima uses `ER SDE` for the v2 examples |
-| **CFG Scale** | `4.0 – 4.5` | Main text CFG |
-| **Reference Guidance** | `4.5` | `1.0` skips the extra guidance pass and still uses the reference |
-| **Guidance End (`ref_end`)** | `1.0` | `0.6` skips the extra guidance pass in later steps |
-| **Reference Size (`ref_megapixels`)** | `1.0 MP` | Native reference resolution |
-| **Guidance Correction** | `apg` | Or `rescale` (`Rescale Phi = 0.5`) to prevent over-saturation |
-| **RoPE Offset H** | `1.0` | Training default |
-| **Anima Safe PAG** *(optional)* | `Scale = 1.3`, `Block = 18`, `Strength = 0.75` | Extra sharpness |
+Use the [comparison protocol](docs/model-testing.md#english) to test adapters on one checkpoint or test checkpoints with one adapter. It includes a reference image, prompts, fixed generation settings, and a results template.
 
-### Prompting Guide
-- **Do not** specify character names, artist names, or visual tags already present in the reference image.
-- Only describe the **new scene**, pose, framing, lighting, and general quality:
-  ```text
-  wariza, 1girl, masterpiece, best quality, solo
-  ```
-- **Two Characters:**
-  Place character 1 in Ref 1 (Left) and character 2 in Ref 2 (Right). In prompt, specify positions:
-  ```text
-  2girls, 1girl on the left, 1girl on the right, hugging, smile, masterpiece, best quality
-  ```
+## Credits and license
 
----
+This extension integrates the Anima Ref Adapter, SnapRef, and Anima Safe PAG with Forge Neo. [Anima Ref Adapter](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter) · [SnapRef](https://github.com/ArcAnima/SnapRef) · [Anima Safe PAG](https://github.com/iljung1106/comfyui-anima-safe-pag)
 
-## License
-
-Apache-2.0 License. See [LICENSE](LICENSE) for details.
+The extension code uses the [Apache-2.0 license](LICENSE). See each model's release page for its weights license.
