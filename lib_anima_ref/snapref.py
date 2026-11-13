@@ -15,7 +15,17 @@ from safetensors import safe_open
 
 from backend.utils import pad_to_patch_size
 
-from .adapter import ATTENTION_BIAS_KEY, _flatten_alpha, _frame_embed, _project_attention, _sdpa_attention, snapref_metadata
+from .adapter import (
+    ATTENTION_BIAS_KEY,
+    NO_REF_KEY,
+    _flatten_alpha,
+    _frame_positions,
+    _project_attention,
+    _rope_from_positions,
+    _sdpa_attention,
+    make_post_cfg,
+    snapref_metadata,
+)
 
 
 SNAPREF_KEY = "anima_snapref"
@@ -27,15 +37,17 @@ _BASE_BLOCKS_IN_29B = (
 
 def _read_lora_matrix(handle, key: str) -> torch.Tensor:
     matrix = handle.get_tensor(key)
-    if matrix.dtype == torch.bfloat16:
-        return matrix
-    if matrix.dtype != torch.float8_e4m3fn:
-        raise ValueError(f"Unsupported SnapRef tensor dtype {matrix.dtype} for {key}.")
-
-    scale = handle.get_tensor(f"{key}_scale")
-    if scale.dtype != torch.float32 or scale.shape != (matrix.shape[0], 1):
-        raise ValueError(f"Expected one FP32 scale per row for SnapRef tensor {key}.")
-    return (matrix.float() * scale).to(torch.bfloat16)
+    scale_key = f"{key}_scale"
+    if scale_key in handle.keys():
+        scale = handle.get_tensor(scale_key)
+        if matrix.dtype == torch.float8_e4m3fn and (scale.dtype != torch.float32 or scale.shape != (matrix.shape[0], 1)):
+            raise ValueError(f"Expected one FP32 scale per row for SnapRef tensor {key}.")
+        return (matrix.float() * scale).to(torch.bfloat16)
+    if matrix.dtype == torch.float8_e4m3fn:
+        raise ValueError(f"Expected FP32 scale for FP8 SnapRef tensor {key}.")
+    if matrix.dtype in (torch.bfloat16, torch.float16, torch.float32):
+        return matrix.to(torch.bfloat16)
+    raise ValueError(f"Unsupported SnapRef tensor dtype {matrix.dtype} for {key}.")
 
 
 @lru_cache(maxsize=2)
@@ -45,7 +57,8 @@ def _load_weights(path: str, mtime_ns: int):
         metadata = snapref_metadata(handle)
         if not metadata:
             raise ValueError("Expected a SnapRef anima_ref_kv/1 adapter.")
-        for key in handle.keys():
+        keys = set(handle.keys())
+        for key in keys:
             if not key.startswith("anima_ref_kv.") or not key.endswith(".lora_down"):
                 continue
             stem = key.removesuffix(".lora_down")
@@ -54,7 +67,7 @@ def _load_weights(path: str, mtime_ns: int):
             up = _read_lora_matrix(handle, stem + ".lora_up")
             scale = float(handle.get_tensor(stem + ".alpha")) / down.shape[0]
             weights.setdefault(module, {})[stream] = down, up, scale
-        mode_embed = handle.get_tensor("anima_ref_kv.mode_embed")
+        mode_embed = handle.get_tensor("anima_ref_kv.mode_embed") if "anima_ref_kv.mode_embed" in keys else None
     if {stream for streams in weights.values() for stream in streams} != {"ref", "tgt"}:
         raise ValueError("SnapRef needs both reference and target LoRA weights.")
     return metadata, weights, mode_embed
@@ -153,6 +166,7 @@ def _attention_forward(attn, original, index, state):
     return forward
 
 
+@torch.no_grad()
 def _encode_reference(dm, x, ref, context, mode_embed, ref_t, state):
     stride = dm.patch_spatial
     ref = pad_to_patch_size(ref.to(x), (dm.patch_temporal, stride, stride))
@@ -160,16 +174,24 @@ def _encode_reference(dm, x, ref, context, mode_embed, ref_t, state):
         round((target // stride - source // stride) / 2)
         for target, source in zip(x.shape[-2:], ref.shape[-2:])
     )
-    latent, rope, timestep, adaln = _frame_embed(dm, ref, ref_t, *offset, torch.zeros(1, device=x.device))
-    timestep = timestep + mode_embed.to(timestep)[None, None, :]
+    latent, _, _ = dm.prepare_embedded_sequence(ref, padding_mask=None)
+    _, _, hp, wp, _ = latent.shape
+    rope = _rope_from_positions(dm.pos_embedder, *_frame_positions(ref_t, hp, wp, *offset, ref.device)).unsqueeze(1).unsqueeze(0)
+    # .forward, not __call__: hooks other extensions put on these modules steer the target, not the reference
+    sinusoid = dm.t_embedder[0].forward(torch.zeros(ref.shape[0], 1, device=ref.device))
+    timestep, adaln = dm.t_embedder[1].forward(sinusoid.to(latent.dtype))
+    timestep = dm.t_embedding_norm.forward(timestep)
+    if mode_embed is not None:
+        timestep = timestep + mode_embed.to(timestep)[None, None, :]
     context = context.to(x)
+    latent = latent.float() if latent.dtype == torch.float16 else latent
 
     state.stream = "ref"
     state.record = []
     for block in dm.blocks:
-        latent = block(
+        latent = block.forward(
             latent, timestep, context,
-            rope_emb_L_1_1_D=rope, adaln_lora_B_T_3D=adaln, transformer_options={},
+            rope_emb_L_1_1_D=rope, adaln_lora_B_T_3D=adaln, extra_per_block_pos_emb=None, transformer_options={},
         )
     kv = state.record
     state.record = None
@@ -195,14 +217,29 @@ def _encode_references(dm, x, references, context, mode_embed, ref_t, state):
     return combined, bias
 
 
-def patch_unet_for_snapref(unet, references, context, path: str, mode: str, cache: dict):
+def patch_unet_for_snapref(
+    unet,
+    references,
+    context,
+    path: str,
+    mode: str,
+    cache: dict,
+    in_uncond: bool = False,
+    ref_guidance: float = 4.5,
+    correction: str = "apg",
+    rescale_phi: float = 0.5,
+    ref_end: float = 1.0,
+):
     """Attach the SnapRef streams and share the reference cache across sampling steps."""
+    if not references or all(weight == 0 for _, weight in references):
+        return unet
     dm = unet.get_model_object("diffusion_model")
     metadata, weights, mode_embed = _load_weights(os.path.abspath(path), os.stat(path).st_mtime_ns)
     modes = metadata.get("modes", ["cs"])
     if mode not in modes:
         raise ValueError(f"This SnapRef adapter does not support the {mode!r} mode.")
-    mode_embed = mode_embed[modes.index(mode)]
+    if mode_embed is not None:
+        mode_embed = mode_embed[modes.index(mode)]
     block_map = _block_map(weights, len(dm.blocks))
 
     m = unet.clone()
@@ -237,7 +274,8 @@ def patch_unet_for_snapref(unet, references, context, path: str, mode: str, cach
 
         try:
             flags = options.get("cond_or_uncond") or [0]
-            if 0 in flags:
+            use = [not options.get(NO_REF_KEY) and (f == 0 or in_uncond) for f in flags]
+            if any(use):
                 target = (tuple(x.shape[-2:]), x.device, x.dtype)
                 cached = cache.get(kv_key)
                 if cached is None or cached[0] != target:
@@ -245,8 +283,13 @@ def patch_unet_for_snapref(unet, references, context, path: str, mode: str, cach
                     cached = target, _encode_references(dm, x, references, reference_context, mode_embed, ref_t, state)
                     cache[kv_key] = cached
                 state.kv, state.bias = cached[1]
-                if 1 in flags:
-                    state.rows = options["cond_indices"], options["uncond_indices"]
+                if not all(use):
+                    n = x.shape[0] // len(flags)
+                    row_use = [use[r // n] for r in range(x.shape[0])]
+                    state.rows = (
+                        [r for r, u in enumerate(row_use) if u],
+                        [r for r, u in enumerate(row_use) if not u],
+                    )
 
             state.stream = "tgt"
             return original_forward(x, timesteps, context, padding_mask=padding_mask, **kwargs)
@@ -257,4 +300,6 @@ def patch_unet_for_snapref(unet, references, context, path: str, mode: str, cach
     ref_t = int(metadata.get("ref_t", 10))
     m.add_object_patch("diffusion_model.forward", wrapped_forward)
     m.set_transformer_option(SNAPREF_KEY, token)
+    if in_uncond:
+        m.set_model_sampler_post_cfg_function(make_post_cfg(ref_guidance, correction, rescale_phi, ref_end))
     return m

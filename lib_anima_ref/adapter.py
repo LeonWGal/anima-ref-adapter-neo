@@ -1001,6 +1001,31 @@ def encode_multi_reference_latents(
 # endregion
 
 
+def make_post_cfg(ref_guidance: float, correction: str, rescale_phi: float = 0.5, ref_end: float = 1.0):
+    """Build a post-CFG function that applies reference guidance and correction."""
+    def post_cfg(args):
+        guided, pos = args["denoised"], args["cond_denoised"]
+        model, sigma = args["model"], args["sigma"]
+        if ref_guidance != 1.0 and (
+            ref_end >= 1.0 or _sigma_to_float(sigma) >= model.predictor.percent_to_sigma(ref_end) - 1e-5
+        ):
+            options = args["model_options"].copy()
+            options["transformer_options"] = {**options.get("transformer_options", {}), NO_REF_KEY: True}
+            # Forge passes the original negative conditioning even when it skips CFG 1's negative pass.
+            if args["uncond"] and (
+                not math.isclose(args["cond_scale"], 1.0) or options.get("disable_cfg1_optimization")
+            ):
+                ref_pred = args["uncond_denoised"]
+                _, base = calc_cond_uncond_batch(model, [], args["uncond"], args["input"], sigma, options)
+            else:
+                ref_pred = pos
+                base, _ = calc_cond_uncond_batch(model, args["cond"], None, args["input"], sigma, options)
+            guided = guided + (ref_guidance - 1.0) * (ref_pred - base)
+        return _correct(guided, pos, correction, rescale_phi)
+
+    return post_cfg
+
+
 def patch_unet_for_anima_ref(
     unet,
     ref_latents: dict[str, torch.Tensor],
@@ -1065,30 +1090,12 @@ def patch_unet_for_anima_ref(
         finally:
             _active["key"] = previous
 
-    def post_cfg(args):
-        guided, pos = args["denoised"], args["cond_denoised"]
-        model, sigma = args["model"], args["sigma"]
-        if config.ref_guidance != 1.0 and (
-            config.ref_end >= 1.0 or _sigma_to_float(sigma) >= model.predictor.percent_to_sigma(config.ref_end) - 1e-5
-        ):
-            options = args["model_options"].copy()
-            options["transformer_options"] = {**options.get("transformer_options", {}), NO_REF_KEY: True}
-            # Forge passes the original negative conditioning even when it skips CFG 1's negative pass.
-            if args["uncond"] and (
-                not math.isclose(args["cond_scale"], 1.0) or options.get("disable_cfg1_optimization")
-            ):
-                ref_pred = args["uncond_denoised"]
-                _, base = calc_cond_uncond_batch(model, [], args["uncond"], args["input"], sigma, options)
-            else:
-                ref_pred = pos
-                base, _ = calc_cond_uncond_batch(model, args["cond"], None, args["input"], sigma, options)
-            guided = guided + (config.ref_guidance - 1.0) * (ref_pred - base)
-        return _correct(guided, pos, config.correction, config.rescale_phi)
-
     wrapped_forward._anima_ref_inner = orig_forward
     m.add_object_patch("diffusion_model.forward", wrapped_forward)
     m.set_transformer_option(OPTIONS_REF_KEY, patch_token)
-    m.set_model_sampler_post_cfg_function(post_cfg)
+    m.set_model_sampler_post_cfg_function(
+        make_post_cfg(config.ref_guidance, config.correction, config.rescale_phi, config.ref_end)
+    )
     return m
 
 

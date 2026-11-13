@@ -378,6 +378,28 @@ class AnimaRefAdapterForForge(scripts.Script):
                                 info="Use Separate for views of one character and Side by side for two characters. Weight 0 skips a slot.",
                                 elem_id=self.elem_id("snapref_layout"),
                             )
+                            snapref_weight = gr.Slider(
+                                minimum=0.0,
+                                maximum=2.0,
+                                value=1.0,
+                                step=0.05,
+                                label="Ref weight",
+                                info="Weight of the reference in attention (1 = trained, 0 = adapter off).",
+                                elem_id=self.elem_id("snapref_weight"),
+                            )
+                            ref_caption = gr.Textbox(
+                                value="",
+                                lines=2,
+                                label="Ref caption (optional)",
+                                placeholder="Optional reference appearance tags; empty works",
+                                elem_id=self.elem_id("ref_caption"),
+                            )
+                            snapref_guidance = gr.Checkbox(
+                                value=False,
+                                label="SnapRef guidance",
+                                info="Enable ref guidance, correction, and ref end. Off keeps the trained positive-only reference behavior.",
+                                elem_id=self.elem_id("snapref_guidance"),
+                            )
 
                         with gr.Row(elem_classes=["anima-multi-mode-row"]) as combine_row:
                             combine_mode = gr.Radio(
@@ -656,10 +678,23 @@ class AnimaRefAdapterForForge(scripts.Script):
             show_progress=False,
         )
 
-        def _on_lora_change(selected_lora, layout="stitch"):
+        def _is_snapref_selected(selected_lora):
             path = find_lora_path(selected_lora) if selected_lora else None
             snapref_file = is_snapref_adapter(path)
-            snapref = selected_lora in SNAPREF_FILES or snapref_file
+            return path, snapref_file, (selected_lora in SNAPREF_FILES or snapref_file)
+
+        def _guidance_visibility(snapref: bool, guidance_on: bool, corr_val: str):
+            show_guidance = (not snapref) or bool(guidance_on)
+            return [
+                gr.update(visible=show_guidance),  # guidance_row
+                gr.update(visible=show_guidance),  # ref_guidance
+                gr.update(visible=show_guidance),  # ref_end
+                gr.update(visible=show_guidance),  # correction_row
+                gr.update(visible=show_guidance and str(corr_val).lower() == "rescale"),  # rescale_phi
+            ]
+
+        def _on_lora_change(selected_lora, layout="stitch", guidance_on=False, corr_val="apg"):
+            path, snapref_file, snapref = _is_snapref_selected(selected_lora)
             valid = snapref_file if snapref else is_anima_adapter(path)
             released = selected_lora in DOWNLOADABLE_FILES
             download = gr.update(visible=released and not valid)
@@ -677,28 +712,38 @@ class AnimaRefAdapterForForge(scripts.Script):
                 choices = V2_LAYOUTS if asym else PILOT_LAYOUTS
                 layout_update = gr.update(choices=choices, value=layout if layout in dict(choices).values() else "stitch")
             visibility = [gr.update(visible=not snapref) for _ in legacy_controls]
-            return download, gr.update(value=status), gr.update(visible=snapref), *visibility, layout_update, gr.update(visible=snapref)
+            guidance_vis = _guidance_visibility(snapref, guidance_on, corr_val)
+            return download, gr.update(value=status), gr.update(visible=snapref), *visibility, *guidance_vis, layout_update, gr.update(visible=snapref)
 
-        legacy_controls = [combine_row, presets_header, presets_row, guidance_row, ref_end, correction_row, framing]
-        adapter_controls = [download_btn, download_status, snapref_controls, *legacy_controls, combine_mode, snapref_mode]
+        legacy_controls = [combine_row, presets_header, presets_row, strength, framing]
+        guidance_controls = [guidance_row, ref_guidance, ref_end, correction_row, rescale_phi]
+        adapter_controls = [download_btn, download_status, snapref_controls, *legacy_controls, *guidance_controls, combine_mode, snapref_mode]
+
+        snapref_guidance.change(
+            fn=lambda selected_lora, guidance_on, corr_val: _guidance_visibility(_is_snapref_selected(selected_lora)[2], guidance_on, corr_val),
+            inputs=[lora_name, snapref_guidance, correction],
+            outputs=guidance_controls,
+            queue=False,
+            show_progress=False,
+        )
 
         lora_name.change(
             fn=_on_lora_change,
-            inputs=[lora_name, combine_mode],
+            inputs=[lora_name, combine_mode, snapref_guidance, correction],
             outputs=adapter_controls,
             queue=False,
             show_progress=False,
         )
 
-        def _refresh_loras(current_val, layout="stitch"):
+        def _refresh_loras(current_val, layout="stitch", guidance_on=False, corr_val="apg"):
             choices = _lora_choices()
             if current_val and current_val not in choices:
                 choices.append(current_val)
-            return gr.update(choices=[(_adapter_label(name), name) for name in choices]), *_on_lora_change(current_val, layout)
+            return gr.update(choices=[(_adapter_label(name), name) for name in choices]), *_on_lora_change(current_val, layout, guidance_on, corr_val)
 
         refresh_btn.click(
             fn=_refresh_loras,
-            inputs=[lora_name, combine_mode],
+            inputs=[lora_name, combine_mode, snapref_guidance, correction],
             outputs=[lora_name, *adapter_controls],
             queue=False,
             show_progress=False,
@@ -718,7 +763,7 @@ class AnimaRefAdapterForForge(scripts.Script):
             show_progress=True,
         ).then(
             fn=_on_lora_change,
-            inputs=[lora_name, combine_mode],
+            inputs=[lora_name, combine_mode, snapref_guidance, correction],
             outputs=adapter_controls,
             queue=False,
         )
@@ -743,6 +788,9 @@ class AnimaRefAdapterForForge(scripts.Script):
             (ref_megapixels, "Anima Ref Megapixels"),
             (snapref_mode, "Anima SnapRef Mode"),
             (snapref_layout, "Anima SnapRef Layout"),
+            (snapref_weight, "Anima SnapRef Weight"),
+            (ref_caption, "Anima SnapRef Caption"),
+            (snapref_guidance, "Anima SnapRef Guidance"),
             (correction, "Anima Ref Correction"),
             (combine_mode, "Anima Ref Combine Mode"),
             (rescale_phi, "Anima Ref Rescale Phi"),
@@ -790,6 +838,9 @@ class AnimaRefAdapterForForge(scripts.Script):
             ref_megapixels,
             snapref_mode,
             snapref_layout,
+            snapref_weight,
+            ref_caption,
+            snapref_guidance,
         ]
 
     def process_before_every_sampling(
@@ -826,6 +877,9 @@ class AnimaRefAdapterForForge(scripts.Script):
         ref_megapixels: float = 1.0,
         snapref_mode: str = "cs",
         snapref_layout: str = "separate",
+        snapref_weight: float = 1.0,
+        ref_caption: str = "",
+        snapref_guidance: bool = False,
         *args,
         **kwargs,
     ):
@@ -876,27 +930,57 @@ class AnimaRefAdapterForForge(scripts.Script):
             dynamic_args.ref_latents.clear()
             vae = p.sd_model.forge_objects.vae
             if snapref:
-                try:
-                    megapixels = float(ref_megapixels)
-                    layout = "stitch" if snapref_layout == "stitch" else "separate"
-                    inputs = active_refs
-                    if layout == "stitch" and len(inputs) > 1:
-                        _, sheet = build_asym_reference_image(inputs, megapixels)
-                        inputs = [(sheet, 1.0)]
-                    references, previews = [], []
-                    for image, weight in inputs:
-                        ref, preview = encode_snapref_image(image, vae, megapixels, 255)
-                        references.append((ref, weight if layout == "separate" else 1.0))
-                        previews.append(preview)
-                    context = p.sd_model.get_learned_conditioning(SdConditioning([""], is_negative_prompt=True))[0]
-                    unet = patch_unet_for_snapref(unet, references, context, lora_path, snapref_mode, self.cache)
-                except Exception as exc:
-                    raise gr.Error(f"[SnapRef] {exc}") from exc
-                if include_ref_in_gallery:
-                    self._last_letterboxed_list = previews
-                p.extra_generation_params["Anima SnapRef Mode"] = snapref_mode
-                p.extra_generation_params["Anima SnapRef Layout"] = layout
-                p.extra_generation_params["Anima Ref Images"] = len(active_refs)
+                global_weight = float(snapref_weight)
+                if global_weight == 0.0:
+                    logger.info("[Anima Ref Adapter] SnapRef Ref weight is 0; bypassing reference adapter.")
+                else:
+                    try:
+                        megapixels = float(ref_megapixels)
+                        layout = "stitch" if snapref_layout == "stitch" else "separate"
+                        inputs = active_refs
+                        if layout == "stitch" and len(inputs) > 1:
+                            _, sheet = build_asym_reference_image(inputs, megapixels)
+                            inputs = [(sheet, global_weight)]
+                        references, previews = [], []
+                        for image, weight in inputs:
+                            ref, preview = encode_snapref_image(image, vae, megapixels, 255)
+                            eff_weight = (weight * global_weight) if layout == "separate" else global_weight
+                            references.append((ref, eff_weight))
+                            previews.append(preview)
+                        caption = str(ref_caption or "").strip()
+                        context = p.sd_model.get_learned_conditioning(
+                            SdConditioning([caption], is_negative_prompt=not caption)
+                        )[0]
+                        unet = patch_unet_for_snapref(
+                            unet,
+                            references,
+                            context,
+                            lora_path,
+                            snapref_mode,
+                            self.cache,
+                            in_uncond=bool(snapref_guidance),
+                            ref_guidance=float(ref_guidance),
+                            correction=str(correction),
+                            rescale_phi=float(rescale_phi),
+                            ref_end=float(ref_end),
+                        )
+                    except Exception as exc:
+                        raise gr.Error(f"[SnapRef] {exc}") from exc
+                    if include_ref_in_gallery:
+                        self._last_letterboxed_list = previews
+                    p.extra_generation_params["Anima SnapRef Mode"] = snapref_mode
+                    p.extra_generation_params["Anima SnapRef Layout"] = layout
+                    p.extra_generation_params["Anima SnapRef Weight"] = global_weight
+                    if caption:
+                        p.extra_generation_params["Anima SnapRef Caption"] = caption
+                    p.extra_generation_params["Anima SnapRef Guidance"] = bool(snapref_guidance)
+                    if snapref_guidance:
+                        p.extra_generation_params["Anima Ref Guidance"] = float(ref_guidance)
+                        p.extra_generation_params["Anima Ref End"] = float(ref_end)
+                        p.extra_generation_params["Anima Ref Correction"] = str(correction)
+                        if str(correction).lower() == "rescale":
+                            p.extra_generation_params["Anima Ref Rescale Phi"] = float(rescale_phi)
+                    p.extra_generation_params["Anima Ref Images"] = len(active_refs)
             else:
 
                 x = kwargs.get("x")
