@@ -94,8 +94,13 @@ def _coerce_pil_image(img) -> Optional[Image.Image]:
             return None
     if isinstance(img, np.ndarray):
         return Image.fromarray(img)
-    if isinstance(img, dict) and "image" in img:
-        return _coerce_pil_image(img["image"])
+    if isinstance(img, dict):
+        if "image" in img:
+            return _coerce_pil_image(img["image"])
+        if "path" in img and isinstance(img["path"], str) and os.path.isfile(img["path"]):
+            return _coerce_pil_image(img["path"])
+        if "url" in img and isinstance(img["url"], str) and img["url"].startswith("data:"):
+            return _coerce_pil_image(img["url"])
     return None
 
 
@@ -886,6 +891,32 @@ class AnimaRefAdapterForForge(scripts.Script):
         self._release_sampling_state()
         self._last_letterboxed_ref = None
         self._last_letterboxed_list = []
+
+        xyz = getattr(p, "_anima_ref_xyz", None)
+        if isinstance(xyz, dict):
+            if "enable" in xyz:
+                enable = bool(xyz["enable"])
+            if "preset" in xyz:
+                preset_vals = _XYZ_PRESETS.get(str(xyz["preset"]))
+                if preset_vals:
+                    strength, ref_guidance, ref_end, correction, rescale_phi = preset_vals
+            if "lora_name" in xyz:
+                lora_name = str(xyz["lora_name"])
+            if "snapref_mode" in xyz:
+                snapref_mode = str(xyz["snapref_mode"])
+            if "snapref_layout" in xyz:
+                snapref_layout = str(xyz["snapref_layout"])
+            if "strength" in xyz:
+                strength = float(xyz["strength"])
+            if "ref_guidance" in xyz:
+                ref_guidance = float(xyz["ref_guidance"])
+            if "ref_end" in xyz:
+                ref_end = float(xyz["ref_end"])
+            if "correction" in xyz:
+                correction = str(xyz["correction"])
+            if "snapref_weight" in xyz:
+                snapref_weight = float(xyz["snapref_weight"])
+
         if not enable:
             return
 
@@ -1098,3 +1129,104 @@ class AnimaRefAdapterForForge(scripts.Script):
         elif self._last_letterboxed_ref is not None:
             processed.extra_images.append(self._last_letterboxed_ref)
             self._last_letterboxed_ref = None
+
+
+_XYZ_PRESETS = {
+    "Balanced": (1.0, 4.5, 1.0, "apg", 0.5),
+    "Turbo / Fast": (1.0, 4.5, 0.6, "apg", 0.5),
+    "Strong likeness": (1.1, 6.0, 1.0, "apg", 0.5),
+    "High guidance": (1.0, 6.5, 1.0, "rescale", 0.7),
+}
+
+
+def _xyz_set(p, x, xs, field: str):
+    if not hasattr(p, "_anima_ref_xyz") or not isinstance(p._anima_ref_xyz, dict):
+        p._anima_ref_xyz = {}
+    p._anima_ref_xyz[field] = x
+
+
+def _xyz_set_bool(p, x, xs, field: str):
+    val = str(x).strip().lower() in ("true", "1", "yes", "on")
+    _xyz_set(p, val, xs, field=field)
+
+
+def _register_xyz_axis_options():
+    from functools import partial
+    from modules import script_callbacks as _sc
+
+    xyz_grid = None
+    for s in scripts.scripts_data:
+        if getattr(s.script_class, "__module__", "") == "xyz_grid.py":
+            xyz_grid = s.module
+            break
+    if xyz_grid is None:
+        return
+
+    axis = [
+        xyz_grid.AxisOption(
+            "[Anima Ref] Enable",
+            str,
+            partial(_xyz_set_bool, field="enable"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Preset",
+            str,
+            partial(_xyz_set, field="preset"),
+            choices=lambda: list(_XYZ_PRESETS.keys()),
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Adapter LoRA",
+            str,
+            partial(_xyz_set, field="lora_name"),
+            choices=_lora_choices,
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] SnapRef Mode",
+            str,
+            partial(_xyz_set, field="snapref_mode"),
+            choices=lambda: ["cs", "char"],
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] SnapRef Layout",
+            str,
+            partial(_xyz_set, field="snapref_layout"),
+            choices=lambda: ["separate", "stitch"],
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Strength",
+            float,
+            partial(_xyz_set, field="strength"),
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Ref Guidance",
+            float,
+            partial(_xyz_set, field="ref_guidance"),
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Ref Guidance End",
+            float,
+            partial(_xyz_set, field="ref_end"),
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] Correction",
+            str,
+            partial(_xyz_set, field="correction"),
+            choices=lambda: ["apg", "rescale", "none"],
+        ),
+        xyz_grid.AxisOption(
+            "[Anima Ref] SnapRef Weight",
+            float,
+            partial(_xyz_set, field="snapref_weight"),
+        ),
+    ]
+
+    existing = {x.label for x in xyz_grid.axis_options}
+    xyz_grid.axis_options.extend(x for x in axis if x.label not in existing)
+
+
+try:
+    from modules import script_callbacks
+    script_callbacks.on_before_ui(_register_xyz_axis_options)
+except Exception as _xyz_err:
+    logger.debug(f"[Anima Ref Adapter] XYZ registration skipped: {_xyz_err}")
