@@ -928,7 +928,12 @@ class AnimaRefAdapterForForge(scripts.Script):
             gr.Warning("Select an Anima checkpoint to use Anima Ref Adapter.")
             return
 
+        if getattr(self, "_orig_unet", None) is not None:
+            p.sd_model.forge_objects.unet = self._orig_unet
+            self._orig_unet = None
+
         unet = p.sd_model.forge_objects.unet
+        self._orig_unet = unet
 
         active_refs = []
         for img, weight in [
@@ -1128,6 +1133,12 @@ class AnimaRefAdapterForForge(scripts.Script):
         self._release_sampling_state()
 
     def postprocess(self, p, processed, *args):
+        self._release_sampling_state()
+        if getattr(self, "_orig_unet", None) is not None:
+            p.sd_model.forge_objects.unet = self._orig_unet
+            self._orig_unet = None
+        if processed is None:
+            return
         if getattr(self, "_last_letterboxed_list", None):
             for lb in self._last_letterboxed_list:
                 processed.extra_images.append(lb)
