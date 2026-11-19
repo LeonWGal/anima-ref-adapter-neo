@@ -251,12 +251,18 @@ def patch_unet_for_snapref(
             name = f"blocks.{block_map[int(index)]}.{suffix}"
         attr = f"diffusion_model.{name}.forward"
         original = m.get_model_object(attr)
-        m.add_object_patch(attr, _lora_forward(original, streams, state, cache, token))
+        original = getattr(original, "_snapref_inner", original)
+        wrapped = _lora_forward(original, streams, state, cache, token)
+        wrapped._snapref_inner = original
+        m.add_object_patch(attr, wrapped)
 
     for index, block in enumerate(dm.blocks):
         attr = f"diffusion_model.blocks.{index}.self_attn.forward"
         original = m.get_model_object(attr)
-        m.add_object_patch(attr, _attention_forward(block.self_attn, original, index, state))
+        original = getattr(original, "_snapref_inner", original)
+        wrapped = _attention_forward(block.self_attn, original, index, state)
+        wrapped._snapref_inner = original
+        m.add_object_patch(attr, wrapped)
 
     dtype_size = torch.empty((), dtype=unet.model.computation_dtype).element_size()
     tokens = sum((ref.shape[-2] // dm.patch_spatial) * (ref.shape[-1] // dm.patch_spatial) for ref, _ in references)
@@ -265,6 +271,7 @@ def patch_unet_for_snapref(
     m.add_extra_preserved_memory_during_sampling(kv_bytes + lora_bytes)
 
     original_forward = m.get_model_object("diffusion_model.forward")
+    original_forward = getattr(original_forward, "_snapref_inner", original_forward)
     kv_key = (token, "kv")
 
     def wrapped_forward(x, timesteps, context, padding_mask=None, **kwargs):

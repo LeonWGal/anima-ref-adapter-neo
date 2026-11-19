@@ -928,7 +928,12 @@ class AnimaRefAdapterForForge(scripts.Script):
             gr.Warning("Select an Anima checkpoint to use Anima Ref Adapter.")
             return
 
+        if getattr(self, "_orig_unet", None) is not None:
+            p.sd_model.forge_objects.unet = self._orig_unet
+            self._orig_unet = None
+
         unet = p.sd_model.forge_objects.unet
+        self._orig_unet = unet
 
         active_refs = []
         for img, weight in [
@@ -979,9 +984,16 @@ class AnimaRefAdapterForForge(scripts.Script):
                             references.append((ref, eff_weight))
                             previews.append(preview)
                         caption = str(ref_caption or "").strip()
-                        context = p.sd_model.get_learned_conditioning(
+                        cond = p.sd_model.get_learned_conditioning(
                             SdConditioning([caption], is_negative_prompt=not caption)
-                        )[0]
+                        )
+                        if isinstance(cond, dict):
+                            crossattn = cond.get("crossattn")
+                            if crossattn is None:
+                                crossattn = list(cond.values())[0]
+                            context = crossattn.unsqueeze(0) if crossattn.ndim == 2 else crossattn
+                        else:
+                            context = cond[0]
                         unet = patch_unet_for_snapref(
                             unet,
                             references,
@@ -1121,6 +1133,12 @@ class AnimaRefAdapterForForge(scripts.Script):
         self._release_sampling_state()
 
     def postprocess(self, p, processed, *args):
+        self._release_sampling_state()
+        if getattr(self, "_orig_unet", None) is not None:
+            p.sd_model.forge_objects.unet = self._orig_unet
+            self._orig_unet = None
+        if processed is None:
+            return
         if getattr(self, "_last_letterboxed_list", None):
             for lb in self._last_letterboxed_list:
                 processed.extra_images.append(lb)
